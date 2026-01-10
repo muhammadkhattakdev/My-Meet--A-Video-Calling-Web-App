@@ -35,8 +35,9 @@ const userSchema = new mongoose.Schema(
           type: String,
           default: 'Untitled Meeting',
         },
-        recordingUrl: {
-          type: String,
+        recordingId: {
+          // GridFS file ID
+          type: mongoose.Schema.Types.ObjectId,
           required: true,
         },
         duration: {

@@ -1,6 +1,8 @@
 import { v4 as uuidv4 } from 'uuid';
 import Meeting from '../models/Meeting.js';
 import User from '../models/User.js';
+import path from 'path';
+import fs from 'fs';
 
 // @desc    Create a new meeting
 // @route   POST /api/meetings/create
@@ -78,6 +80,7 @@ export const getMeeting = async (req, res) => {
           startedAt: meeting.startedAt,
           endedAt: meeting.endedAt,
           isRecording: meeting.isRecording,
+          recording: meeting.recording,
         },
       },
     });
@@ -140,7 +143,7 @@ export const endMeeting = async (req, res) => {
   }
 };
 
-// @desc    Save recording
+// @desc    Save recording metadata (file already uploaded)
 // @route   POST /api/meetings/:meetingId/recording
 // @access  Private
 export const saveRecording = async (req, res) => {
@@ -157,13 +160,30 @@ export const saveRecording = async (req, res) => {
       });
     }
 
-    // Only host can save recordings
-    if (meeting.hostId.toString() !== req.user._id.toString()) {
+    // Only participants can save recordings
+    const isParticipant = meeting.participants.some(
+      p => p.userId.toString() === req.user._id.toString()
+    );
+    
+    if (!isParticipant && meeting.hostId.toString() !== req.user._id.toString()) {
       return res.status(403).json({
         success: false,
-        message: 'Only the host can save recordings',
+        message: 'Only participants can save recordings',
       });
     }
+
+    // Update meeting with recording info
+    meeting.recording = {
+      recordingUrl,
+      duration: duration || 0,
+      fileSize: fileSize || 0,
+      recordedBy: req.user._id,
+      recordedByName: req.user.fullName,
+      participants: participants || [],
+      recordedAt: new Date(),
+    };
+    meeting.isRecording = false;
+    await meeting.save();
 
     // Add recording to user's profile
     const user = await User.findById(req.user._id);
@@ -182,7 +202,7 @@ export const saveRecording = async (req, res) => {
       success: true,
       message: 'Recording saved successfully',
       data: {
-        recording: user.recordings[user.recordings.length - 1],
+        recording: meeting.recording,
       },
     });
   } catch (error) {
@@ -239,6 +259,16 @@ export const deleteRecording = async (req, res) => {
       });
     }
 
+    const recording = user.recordings[recordingIndex];
+    
+    // Delete file from filesystem if it exists
+    if (recording.recordingUrl && recording.recordingUrl.startsWith('/uploads')) {
+      const filePath = path.join(process.cwd(), recording.recordingUrl);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+
     user.recordings.splice(recordingIndex, 1);
     await user.save();
 
@@ -251,6 +281,82 @@ export const deleteRecording = async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Server error deleting recording',
+      error: error.message,
+    });
+  }
+};
+
+// @desc    Get meeting recording
+// @route   GET /api/meetings/:meetingId/recording
+// @access  Private
+export const getMeetingRecording = async (req, res) => {
+  try {
+    const { meetingId } = req.params;
+
+    const meeting = await Meeting.findOne({ meetingId });
+
+    if (!meeting) {
+      return res.status(404).json({
+        success: false,
+        message: 'Meeting not found',
+      });
+    }
+
+    if (!meeting.recording) {
+      return res.status(404).json({
+        success: false,
+        message: 'No recording found for this meeting',
+      });
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        recording: meeting.recording,
+      },
+    });
+  } catch (error) {
+    console.error('Get meeting recording error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error fetching recording',
+      error: error.message,
+    });
+  }
+};
+
+// @desc    Update recording status
+// @route   PUT /api/meetings/:meetingId/recording-status
+// @access  Private
+export const updateRecordingStatus = async (req, res) => {
+  try {
+    const { meetingId } = req.params;
+    const { isRecording } = req.body;
+
+    const meeting = await Meeting.findOne({ meetingId });
+
+    if (!meeting) {
+      return res.status(404).json({
+        success: false,
+        message: 'Meeting not found',
+      });
+    }
+
+    meeting.isRecording = isRecording;
+    await meeting.save();
+
+    res.status(200).json({
+      success: true,
+      message: 'Recording status updated',
+      data: {
+        isRecording: meeting.isRecording,
+      },
+    });
+  } catch (error) {
+    console.error('Update recording status error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error updating recording status',
       error: error.message,
     });
   }

@@ -257,6 +257,229 @@
   background: #dc2626;
 }
 
+/* Add these styles to your existing meeting room style.css */
+
+/* Recording Status Banner */
+.recording-status-banner {
+  position: fixed;
+  top: 90px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: var(--spacing-md) var(--spacing-xl);
+  background-color: rgba(34, 197, 94, 0.95);
+  color: white;
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  z-index: var(--z-fixed);
+  animation: slideUp var(--transition-base) ease-out;
+  font-weight: 500;
+}
+
+/* Join Requests Panel */
+.join-requests-panel {
+  position: fixed;
+  top: 90px;
+  right: var(--spacing-xl);
+  width: 360px;
+  max-height: 500px;
+  background: var(--bg-surface);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-xl);
+  border: 1px solid var(--border-default);
+  z-index: var(--z-sticky);
+  overflow: hidden;
+  animation: slideInRight var(--transition-base) ease-out;
+}
+
+@keyframes slideInRight {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+.join-requests-header {
+  padding: var(--spacing-lg);
+  border-bottom: 1px solid var(--border-default);
+  background: var(--bg-muted);
+}
+
+.join-requests-header h3 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.join-requests-list {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.join-request-card {
+  padding: var(--spacing-lg);
+  border-bottom: 1px solid var(--border-default);
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  transition: background var(--transition-fast);
+}
+
+.join-request-card:hover {
+  background: var(--bg-muted);
+}
+
+.join-request-card:last-child {
+  border-bottom: none;
+}
+
+.join-request-info {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-md);
+}
+
+.join-request-avatar {
+  width: 48px;
+  height: 48px;
+  border-radius: var(--radius-full);
+  background: var(--gradient-brand);
+  color: var(--text-inverse);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.join-request-details {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  flex: 1;
+}
+
+.join-request-name {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.join-request-time {
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.join-request-actions {
+  display: flex;
+  gap: var(--spacing-sm);
+}
+
+.join-request-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.join-request-btn.approve {
+  background: var(--color-success);
+  color: white;
+  border-color: var(--color-success);
+}
+
+.join-request-btn.approve:hover {
+  background: #16a34a;
+  border-color: #16a34a;
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+
+.join-request-btn.deny {
+  background: var(--bg-surface);
+  color: var(--text-secondary);
+}
+
+.join-request-btn.deny:hover {
+  background: rgba(244, 63, 94, 0.1);
+  color: var(--color-danger);
+  border-color: var(--color-danger);
+  transform: translateY(-2px);
+}
+
+/* Waiting for Approval Screen */
+.meeting-room-loading h2 {
+  font-size: var(--font-size-2xl);
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: var(--spacing-lg) 0 var(--spacing-sm) 0;
+}
+
+.meeting-room-loading p {
+  font-size: var(--font-size-base);
+  color: var(--text-secondary);
+  margin: 0;
+}
+
+.meeting-room-loading .btn {
+  padding: var(--spacing-sm) var(--spacing-xl);
+  font-size: var(--font-size-base);
+  font-weight: 500;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border: none;
+}
+
+.meeting-room-loading .btn-secondary {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+}
+
+.meeting-room-loading .btn-secondary:hover {
+  background: var(--bg-muted);
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
+/* Mobile Responsive */
+@media (max-width: 768px) {
+  .join-requests-panel {
+    right: var(--spacing-md);
+    left: var(--spacing-md);
+    width: auto;
+  }
+
+  .join-request-actions {
+    flex-direction: column;
+  }
+
+  .join-request-btn {
+    width: 100%;
+  }
+}
+
+/* Color Variables (add to your :root if not present) */
+:root {
+  --color-success: #22c55e;
+  --z-sticky: 100;
+  --z-fixed: 1000;
+}
+
 @media (max-width: 1024px) {
   .participants-grid {
     grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));

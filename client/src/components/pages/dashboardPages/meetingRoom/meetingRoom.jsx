@@ -9,24 +9,55 @@ import {
   PhoneOff,
   Copy,
   Check,
+  Users,
+  UserPlus,
+  UserCheck,
+  Clock,
+  Shield,
+  Loader2,
+  X,
+  CheckCircle,
+  XCircle,
+  AlertCircle,
 } from "lucide-react";
 import { io } from "socket.io-client";
 import "./style.css";
 import api from "../../../request";
 import { useApp } from "../../../../context/context";
 
-// Constants
+// ============================================================================
+// CONSTANTS
+// ============================================================================
 const MAX_RECONNECTION_ATTEMPTS = 5;
 const RECONNECTION_DELAY = 2000;
 const ICE_GATHERING_TIMEOUT = 10000;
 const PEER_CONNECTION_TIMEOUT = 30000;
+const WAITING_ROOM_POLL_INTERVAL = 30000;
 
+// ============================================================================
+// ADMISSION STATUS ENUM
+// ============================================================================
+const AdmissionStatus = {
+  INITIALIZING: "initializing",
+  REQUESTING: "requesting",
+  WAITING: "waiting",
+  APPROVED: "approved",
+  DENIED: "denied",
+  EXPIRED: "expired",
+  ERROR: "error",
+};
+
+// ============================================================================
+// MAIN COMPONENT
+// ============================================================================
 const MeetingRoom = () => {
   const { meetingId } = useParams();
   const navigate = useNavigate();
   const { user } = useApp();
 
-  // Refs
+  // -------------------------------------------------------------------------
+  // REFS
+  // -------------------------------------------------------------------------
   const localVideoRef = useRef(null);
   const socketRef = useRef(null);
   const localStreamRef = useRef(null);
@@ -39,18 +70,41 @@ const MeetingRoom = () => {
   const mixedStreamRef = useRef(null);
   const audioContextRef = useRef(null);
   const canvasRef = useRef(null);
+  const admissionRequestSentRef = useRef(false);
 
-  // State
+  // -------------------------------------------------------------------------
+  // STATE - Media Controls
+  // -------------------------------------------------------------------------
   const [isAudioEnabled, setIsAudioEnabled] = useState(true);
   const [isVideoEnabled, setIsVideoEnabled] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
+
+  // -------------------------------------------------------------------------
+  // STATE - Participants
+  // -------------------------------------------------------------------------
   const [participants, setParticipants] = useState([]);
+  const [connectionStates, setConnectionStates] = useState({});
+
+  // -------------------------------------------------------------------------
+  // STATE - UI
+  // -------------------------------------------------------------------------
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
   const [isInitializing, setIsInitializing] = useState(true);
-  const [connectionStates, setConnectionStates] = useState({});
 
-  // Enhanced ICE servers with TURN fallback
+  // -------------------------------------------------------------------------
+  // STATE - Admission Control (NEW)
+  // -------------------------------------------------------------------------
+  const [admissionStatus, setAdmissionStatus] = useState(AdmissionStatus.INITIALIZING);
+  const [isHost, setIsHost] = useState(false);
+  const [pendingRequests, setPendingRequests] = useState([]);
+  const [showWaitingRoom, setShowWaitingRoom] = useState(false);
+  const [denyReason, setDenyReason] = useState("");
+  const [waitingMessage, setWaitingMessage] = useState("Connecting...");
+
+  // -------------------------------------------------------------------------
+  // ICE SERVERS CONFIGURATION
+  // -------------------------------------------------------------------------
   const iceServers = {
     iceServers: [
       { urls: "stun:stun.l.google.com:19302" },
@@ -58,17 +112,73 @@ const MeetingRoom = () => {
       { urls: "stun:stun2.l.google.com:19302" },
       { urls: "stun:stun3.l.google.com:19302" },
       { urls: "stun:stun4.l.google.com:19302" },
-      // Add TURN servers if available
-      // {
-      //   urls: "turn:your-turn-server.com:3478",
-      //   username: "username",
-      //   credential: "password"
-      // }
     ],
     iceCandidatePoolSize: 10,
   };
 
-  // Initialize media stream
+  // =========================================================================
+  // CLEANUP FUNCTION
+  // =========================================================================
+  const cleanup = useCallback(() => {
+    isLeavingRef.current = true;
+
+    if (isRecording && mediaRecorderRef.current) {
+      try {
+        mediaRecorderRef.current.stop();
+      } catch (e) {
+        console.error("Error stopping recording:", e);
+      }
+    }
+
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => {
+        track.stop();
+      });
+      localStreamRef.current = null;
+    }
+
+    Object.values(peerConnectionsRef.current).forEach((pc) => {
+      if (pc && pc.close) {
+        pc.close();
+      }
+    });
+    peerConnectionsRef.current = {};
+    pendingCandidatesRef.current = {};
+
+    if (socketRef.current) {
+      socketRef.current.disconnect();
+      socketRef.current = null;
+    }
+
+    if (audioContextRef.current) {
+      audioContextRef.current.close();
+      audioContextRef.current = null;
+    }
+
+    if (mixedStreamRef.current) {
+      mixedStreamRef.current.getTracks().forEach((track) => track.stop());
+      mixedStreamRef.current = null;
+    }
+  }, [isRecording]);
+
+  // =========================================================================
+  // MEDIA ERROR HANDLER
+  // =========================================================================
+  const handleMediaError = (err) => {
+    if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+      setError("Camera/microphone access denied. Please grant permissions and reload.");
+    } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
+      setError("No camera or microphone found. Please connect a device.");
+    } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
+      setError("Camera/microphone is already in use by another application.");
+    } else {
+      setError("Failed to access camera/microphone. Please check your device settings.");
+    }
+  };
+
+  // =========================================================================
+  // INITIALIZE MEDIA & SOCKET
+  // =========================================================================
   useEffect(() => {
     const initializeMedia = async () => {
       try {
@@ -91,7 +201,6 @@ const MeetingRoom = () => {
           localVideoRef.current.srcObject = stream;
         }
 
-        // Initialize socket connection
         initializeSocket();
         setIsInitializing(false);
       } catch (err) {
@@ -108,84 +217,53 @@ const MeetingRoom = () => {
     };
   }, []);
 
-  // Handle media errors with specific messages
-  const handleMediaError = (err) => {
-    if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
-      setError("Camera/microphone access denied. Please grant permissions and reload.");
-    } else if (err.name === "NotFoundError" || err.name === "DevicesNotFoundError") {
-      setError("No camera or microphone found. Please connect a device.");
-    } else if (err.name === "NotReadableError" || err.name === "TrackStartError") {
-      setError("Camera/microphone is already in use by another application.");
-    } else {
-      setError("Failed to access camera/microphone. Please check your device settings.");
-    }
-  };
-
-  // Comprehensive cleanup function
-  const cleanup = useCallback(() => {
-    isLeavingRef.current = true;
-
-    // Stop recording if active
-    if (isRecording) {
-      stopRecording();
-    }
-
-    // Stop local stream tracks
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach((track) => {
-        track.stop();
-      });
-      localStreamRef.current = null;
-    }
-
-    // Close all peer connections
-    Object.values(peerConnectionsRef.current).forEach((pc) => {
-      if (pc && pc.close) {
-        pc.close();
-      }
-    });
-    peerConnectionsRef.current = {};
-
-    // Clear pending candidates
-    pendingCandidatesRef.current = {};
-
-    // Disconnect socket
-    if (socketRef.current) {
-      socketRef.current.disconnect();
-      socketRef.current = null;
-    }
-
-    // Clean up audio context
-    if (audioContextRef.current) {
-      audioContextRef.current.close();
-      audioContextRef.current = null;
-    }
-
-    // Clean up mixed stream
-    if (mixedStreamRef.current) {
-      mixedStreamRef.current.getTracks().forEach(track => track.stop());
-      mixedStreamRef.current = null;
-    }
-  }, [isRecording]);
-
-  // Initialize socket with reconnection logic
+  // =========================================================================
+  // SOCKET INITIALIZATION WITH ADMISSION CONTROL
+  // =========================================================================
   const initializeSocket = () => {
-    const socketUrl = import.meta.env.VITE_API_URL || "http://localhost:5000";
+    // Prevent multiple socket initializations
+    if (socketRef.current && socketRef.current.connected) {
+      console.log("Socket already connected, skipping initialization");
+      return;
+    }
     
+    // Disconnect existing socket if any
+    if (socketRef.current) {
+      console.log("Disconnecting existing socket before creating new one");
+      socketRef.current.disconnect();
+    }
+    
+    const socketUrl = import.meta.env.VITE_API_URL || "http://localhost:5000";
+    console.log("Initializing socket connection to:", socketUrl);
+
     socketRef.current = io(socketUrl, {
       reconnection: true,
       reconnectionAttempts: MAX_RECONNECTION_ATTEMPTS,
       reconnectionDelay: RECONNECTION_DELAY,
       timeout: 10000,
+      // Prevent multiple connections
+      forceNew: false,
+      multiplex: true,
     });
 
-    // Socket connection events
+    // Socket Connection Events
     socketRef.current.on("connect", handleSocketConnect);
     socketRef.current.on("disconnect", handleSocketDisconnect);
     socketRef.current.on("reconnect", handleSocketReconnect);
     socketRef.current.on("reconnect_failed", handleSocketReconnectFailed);
 
-    // WebRTC signaling events
+    // Admission Control Events
+    socketRef.current.on("join-approved", handleJoinApproved);
+    socketRef.current.on("join-denied", handleJoinDenied);
+    socketRef.current.on("waiting-for-approval", handleWaitingForApproval);
+    socketRef.current.on("join-request", handleJoinRequest);
+    socketRef.current.on("join-request-processed", handleJoinRequestProcessed);
+    socketRef.current.on("join-request-expired", handleJoinRequestExpired);
+    socketRef.current.on("pending-join-requests", handlePendingJoinRequests);
+    socketRef.current.on("meeting-ended", handleMeetingEnded);
+    socketRef.current.on("host-left", handleHostLeft);
+
+    // WebRTC Signaling Events
     socketRef.current.on("existing-participants", handleExistingParticipants);
     socketRef.current.on("user-joined", handleUserJoined);
     socketRef.current.on("offer", handleOfferReceived);
@@ -195,51 +273,112 @@ const MeetingRoom = () => {
     socketRef.current.on("user-disconnected", handleUserDisconnected);
     socketRef.current.on("user-media-toggle", handleUserMediaToggle);
     socketRef.current.on("renegotiation-needed", handleRenegotiationNeeded);
+
+    // Error Handler
+    socketRef.current.on("error", (data) => {
+      console.error("Socket error:", data.message);
+      setError(data.message);
+    });
   };
 
-  // Socket event handlers
+  // =========================================================================
+  // SOCKET EVENT HANDLERS - Connection
+  // =========================================================================
   const handleSocketConnect = () => {
     console.log("Socket connected:", socketRef.current.id);
     reconnectionAttemptsRef.current = 0;
     setError("");
 
-    // Join room
-    socketRef.current.emit("join-room", {
-      roomId: meetingId,
-      userId: user.id,
-      userName: user.fullName,
-      mediaState: {
-        audio: isAudioEnabled,
-        video: isVideoEnabled,
-      },
-    });
+    // If already approved, rejoin the room with new socket
+    if (admissionStatus === AdmissionStatus.APPROVED) {
+      console.log("Already approved, rejoining room with new socket");
+      socketRef.current.emit("request-join-room", {
+        roomId: meetingId,
+        oduserId: user.id,
+        userName: user.fullName,
+        isRejoin: true,
+      });
+    } else if (!admissionRequestSentRef.current) {
+      // First time requesting to join
+      setAdmissionStatus(AdmissionStatus.REQUESTING);
+      admissionRequestSentRef.current = true;
+
+      socketRef.current.emit("request-join-room", {
+        roomId: meetingId,
+        oduserId: user.id,
+        userName: user.fullName,
+        isRejoin: false,
+      });
+    } else if (admissionStatus === AdmissionStatus.WAITING) {
+      // Still waiting for approval, just update socket ID
+      socketRef.current.emit("update-waiting-socket", {
+        roomId: meetingId,
+        oduserId: user.id,
+      });
+    }
   };
 
   const handleSocketDisconnect = (reason) => {
     console.log("Socket disconnected:", reason);
-    
+
     if (isLeavingRef.current) return;
 
-    setError("Connection lost. Attempting to reconnect...");
-    
-    // Mark all participants as disconnected
-    setConnectionStates((prev) => {
-      const newStates = { ...prev };
-      Object.keys(newStates).forEach((id) => {
-        newStates[id] = "disconnected";
+    if (admissionStatus === AdmissionStatus.APPROVED) {
+      setError("Connection lost. Attempting to reconnect...");
+
+      setConnectionStates((prev) => {
+        const newStates = { ...prev };
+        Object.keys(newStates).forEach((id) => {
+          newStates[id] = "disconnected";
+        });
+        return newStates;
       });
-      return newStates;
-    });
+    }
   };
 
   const handleSocketReconnect = (attemptNumber) => {
     console.log("Socket reconnected after", attemptNumber, "attempts");
     setError("");
 
-    // Rejoin room and re-establish connections
-    socketRef.current.emit("rejoin-room", {
+    if (admissionStatus === AdmissionStatus.APPROVED) {
+      socketRef.current.emit("request-join-room", {
+        roomId: meetingId,
+        oduserId: user.id,
+        userName: user.fullName,
+        isRejoin: true,
+      });
+    } else if (admissionStatus === AdmissionStatus.WAITING) {
+      socketRef.current.emit("update-waiting-socket", {
+        roomId: meetingId,
+        oduserId: user.id,
+      });
+    }
+  };
+
+  const handleSocketReconnectFailed = () => {
+    console.error("Socket reconnection failed");
+    setError("Connection lost. Please refresh the page to rejoin the meeting.");
+    setAdmissionStatus(AdmissionStatus.ERROR);
+  };
+
+  // =========================================================================
+  // SOCKET EVENT HANDLERS - Admission Control
+  // =========================================================================
+  const handleJoinApproved = ({ roomId, isHost: userIsHost, pendingRequests: pending, message }) => {
+    console.log("Join approved:", { roomId, isHost: userIsHost, message });
+
+    setAdmissionStatus(AdmissionStatus.APPROVED);
+    setIsHost(userIsHost);
+    setWaitingMessage("");
+
+    if (userIsHost && pending && pending.length > 0) {
+      setPendingRequests(pending);
+      setShowWaitingRoom(true);
+    }
+
+    socketRef.current.emit("join-room", {
       roomId: meetingId,
-      userId: user.id,
+      oduserId: user.id,
       userName: user.fullName,
       mediaState: {
         audio: isAudioEnabled,
@@ -248,49 +387,139 @@ const MeetingRoom = () => {
     });
   };
 
-  const handleSocketReconnectFailed = () => {
-    console.error("Socket reconnection failed");
-    setError("Connection lost. Please refresh the page to rejoin the meeting.");
+  const handleJoinDenied = ({ reason, permanent }) => {
+    console.log("Join denied:", reason);
+    setAdmissionStatus(AdmissionStatus.DENIED);
+    setDenyReason(reason || "Your request to join was denied by the host.");
   };
 
+  const handleWaitingForApproval = ({ message, position, isDuplicate }) => {
+    console.log("Waiting for approval:", message);
+    setAdmissionStatus(AdmissionStatus.WAITING);
+    setWaitingMessage(message || "Waiting for the host to admit you...");
+  };
+
+  const handleJoinRequest = ({ oduserId, userName, requesterId, requestedAt }) => {
+    console.log("New join request from:", userName);
+
+    setPendingRequests((prev) => {
+      const exists = prev.some((r) => r.oduserId === oduserId);
+      if (exists) {
+        return prev.map((r) =>
+          r.oduserId === oduserId ? { ...r, socketId: requesterId, requestedAt } : r
+        );
+      }
+      return [...prev, { oduserId, userName, socketId: requesterId, requestedAt }];
+    });
+
+    setShowWaitingRoom(true);
+  };
+
+  const handleJoinRequestProcessed = ({ oduserId, userName, action }) => {
+    console.log(`Join request ${action} for:`, userName);
+    setPendingRequests((prev) => prev.filter((r) => r.oduserId !== oduserId));
+  };
+
+  const handleJoinRequestExpired = ({ message }) => {
+    console.log("Join request expired");
+    setAdmissionStatus(AdmissionStatus.EXPIRED);
+    setWaitingMessage(message);
+  };
+
+  const handlePendingJoinRequests = (requests) => {
+    console.log("Received pending requests:", requests.length);
+    setPendingRequests(requests);
+    if (requests.length > 0) {
+      setShowWaitingRoom(true);
+    }
+  };
+
+  const handleMeetingEnded = ({ message, endedBy }) => {
+    console.log("Meeting ended by:", endedBy);
+    setError(message);
+    cleanup();
+    setTimeout(() => {
+      navigate("/");
+    }, 3000);
+  };
+
+  const handleHostLeft = ({ message, hostName }) => {
+    console.log("Host left:", hostName);
+    setError(`${hostName} (host) has left the meeting.`);
+  };
+
+  // =========================================================================
+  // ADMISSION CONTROL ACTIONS
+  // =========================================================================
+  const approveJoinRequest = (oduserId) => {
+    console.log("Approving:", oduserId);
+    socketRef.current.emit("approve-join-request", {
+      roomId: meetingId,
+      oduserId,
+      approverUserId: user.id,  // Send approver's userId for verification
+    });
+  };
+
+  const denyJoinRequest = (oduserId, reason = "") => {
+    console.log("Denying:", oduserId);
+    socketRef.current.emit("deny-join-request", {
+      roomId: meetingId,
+      oduserId,
+      reason,
+      approverUserId: user.id,  // Send approver's userId for verification
+    });
+  };
+
+  const admitAllWaiting = () => {
+    console.log("Admitting all waiting users");
+    socketRef.current.emit("admit-all-waiting", {
+      roomId: meetingId,
+      approverUserId: user.id,  // Send approver's userId for verification
+    });
+    setPendingRequests([]);
+  };
+
+  // =========================================================================
+  // SOCKET EVENT HANDLERS - WebRTC Signaling
+  // =========================================================================
   const handleExistingParticipants = async (existingParticipants) => {
     console.log("Existing participants:", existingParticipants);
 
     for (const participant of existingParticipants) {
-      // Skip self
-      if (participant.userId === user.id) continue;
+      if (participant.oduserId === user.id) continue;
 
       await createPeerConnection(
         participant.socketId,
         participant.userName,
-        participant.userId,
+        participant.oduserId,
         true
       );
     }
   };
 
-  const handleUserJoined = async ({ socketId, userName, userId, mediaState }) => {
+  const handleUserJoined = async ({ socketId, userName, oduserId, mediaState }) => {
     console.log("User joined:", userName, socketId);
 
-    // Prevent duplicate connections
-    if (userId === user.id) return;
+    if (oduserId === user.id) return;
 
-    // Clean up any existing connections for this userId (handles refresh)
     Object.entries(peerConnectionsRef.current).forEach(([oldSocketId, pc]) => {
-      // Check if this is an old connection for the same user
-      const existingParticipant = participants.find(p => p.socketId === oldSocketId);
-      if (existingParticipant && existingParticipant.userId === userId && oldSocketId !== socketId) {
+      const existingParticipant = participants.find((p) => p.socketId === oldSocketId);
+      if (
+        existingParticipant &&
+        existingParticipant.oduserId === oduserId &&
+        oldSocketId !== socketId
+      ) {
         console.log("Cleaning up old connection for refreshed user:", userName);
         removeParticipant(oldSocketId);
       }
     });
 
-    await createPeerConnection(socketId, userName, userId, false);
+    await createPeerConnection(socketId, userName, oduserId, false);
   };
 
-  const handleOfferReceived = async ({ offer, from, userName, userId }) => {
+  const handleOfferReceived = async ({ offer, from, userName, oduserId }) => {
     console.log("Received offer from:", userName);
-    await handleOffer(offer, from, userName, userId);
+    await handleOffer(offer, from, userName, oduserId);
   };
 
   const handleAnswerReceived = async ({ answer, from }) => {
@@ -302,21 +531,22 @@ const MeetingRoom = () => {
     await handleIceCandidate(candidate, from);
   };
 
-  const handleUserLeft = ({ socketId, userName, userId }) => {
+  const handleUserLeft = ({ socketId, userName, oduserId, wasHost }) => {
     console.log("User left:", userName);
     removeParticipant(socketId);
+
+    if (wasHost) {
+      setError(`Host ${userName} has left the meeting.`);
+    }
   };
 
-  const handleUserDisconnected = ({ socketId, userId }) => {
+  const handleUserDisconnected = ({ socketId, oduserId }) => {
     console.log("User disconnected (old socket):", socketId);
-    // Clean up old socket connection immediately
     removeParticipant(socketId);
-    
-    // Also remove any participants with this userId but different socketId
-    // This handles the case where user refreshed and we have stale entries
-    setParticipants((prev) => prev.filter((p) => 
-      !(p.userId === userId && p.socketId !== socketId)
-    ));
+
+    setParticipants((prev) =>
+      prev.filter((p) => !(p.oduserId === oduserId && p.socketId !== socketId))
+    );
   };
 
   const handleUserMediaToggle = ({ socketId, type, enabled }) => {
@@ -332,7 +562,7 @@ const MeetingRoom = () => {
     );
   };
 
-  const handleRenegotiationNeeded = async ({ from, userName, userId }) => {
+  const handleRenegotiationNeeded = async ({ from, userName, oduserId }) => {
     console.log("Renegotiation needed for:", userName);
     const pc = peerConnectionsRef.current[from];
     if (pc && pc.signalingState === "stable") {
@@ -340,16 +570,16 @@ const MeetingRoom = () => {
     }
   };
 
-  // Create peer connection with comprehensive error handling
-  const createPeerConnection = async (socketId, userName, userId, isInitiator) => {
-    // Prevent self-connection
-    if (userId === user.id) {
+  // =========================================================================
+  // WEBRTC - Peer Connection Management
+  // =========================================================================
+  const createPeerConnection = async (socketId, userName, oduserId, isInitiator) => {
+    if (oduserId === user.id) {
       console.log("Skipping self-connection");
       return;
     }
 
     try {
-      // Close existing connection if any (handles reconnection)
       if (peerConnectionsRef.current[socketId]) {
         console.log("Closing existing peer connection for:", userName);
         peerConnectionsRef.current[socketId].close();
@@ -359,26 +589,21 @@ const MeetingRoom = () => {
       const peerConnection = new RTCPeerConnection(iceServers);
       peerConnectionsRef.current[socketId] = peerConnection;
 
-      // Initialize pending candidates array
       pendingCandidatesRef.current[socketId] = [];
 
-      // Update connection state
       setConnectionStates((prev) => ({ ...prev, [socketId]: "connecting" }));
 
-      // Add local stream tracks to peer connection
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach((track) => {
           peerConnection.addTrack(track, localStreamRef.current);
         });
       }
 
-      // Handle incoming tracks
       peerConnection.ontrack = (event) => {
         console.log("Received remote track from:", userName);
-        handleRemoteTrack(event, socketId, userName, userId);
+        handleRemoteTrack(event, socketId, userName, oduserId);
       };
 
-      // Handle ICE candidates
       peerConnection.onicecandidate = (event) => {
         if (event.candidate) {
           socketRef.current.emit("ice-candidate", {
@@ -389,42 +614,37 @@ const MeetingRoom = () => {
         }
       };
 
-      // Handle ICE connection state changes
       peerConnection.oniceconnectionstatechange = () => {
         handleIceConnectionStateChange(peerConnection, socketId, userName);
       };
 
-      // Handle connection state changes
       peerConnection.onconnectionstatechange = () => {
         handleConnectionStateChange(peerConnection, socketId, userName);
       };
 
-      // Handle negotiation needed
       peerConnection.onnegotiationneeded = async () => {
         if (isInitiator && peerConnection.signalingState === "stable") {
           await createAndSendOffer(peerConnection, socketId);
         }
       };
 
-      // Handle signaling state changes
       peerConnection.onsignalingstatechange = () => {
         console.log(`Signaling state for ${userName}:`, peerConnection.signalingState);
       };
 
-      // If initiator, create and send offer
       if (isInitiator) {
         await createAndSendOffer(peerConnection, socketId);
       }
 
-      // Set connection timeout
       setTimeout(() => {
-        if (peerConnection.iceConnectionState === "new" || 
-            peerConnection.iceConnectionState === "checking") {
+        if (
+          peerConnection.iceConnectionState === "new" ||
+          peerConnection.iceConnectionState === "checking"
+        ) {
           console.warn("Peer connection timeout for:", userName);
           setError(`Failed to connect to ${userName}. Please check your network.`);
         }
       }, PEER_CONNECTION_TIMEOUT);
-
     } catch (err) {
       console.error("Error creating peer connection:", err);
       setError(`Failed to establish connection with ${userName}`);
@@ -432,7 +652,6 @@ const MeetingRoom = () => {
     }
   };
 
-  // Create and send offer with retry logic
   const createAndSendOffer = async (peerConnection, socketId, retryCount = 0) => {
     try {
       if (peerConnection.signalingState !== "stable") {
@@ -452,13 +671,13 @@ const MeetingRoom = () => {
         to: socketId,
         from: socketRef.current.id,
         userName: user.fullName,
-        userId: user.id,
+        oduserId: user.id,
       });
 
       console.log("Offer sent to:", socketId);
     } catch (err) {
       console.error("Error creating/sending offer:", err);
-      
+
       if (retryCount < 3) {
         console.log(`Retrying offer creation (attempt ${retryCount + 1})`);
         setTimeout(() => {
@@ -468,21 +687,18 @@ const MeetingRoom = () => {
     }
   };
 
-  // Handle remote track
-  const handleRemoteTrack = (event, socketId, userName, userId) => {
+  const handleRemoteTrack = (event, socketId, userName, oduserId) => {
     const [remoteStream] = event.streams;
 
     setParticipants((prev) => {
-      // First, remove any existing entries for this userId (handles refresh scenario)
-      const withoutUser = prev.filter((p) => p.userId !== userId);
-      
-      // Then add/update with the current socketId
+      const withoutUser = prev.filter((p) => p.oduserId !== oduserId);
+
       return [
         ...withoutUser,
         {
           socketId,
           userName,
-          userId,
+          oduserId,
           stream: remoteStream,
           isAudioEnabled: true,
           isVideoEnabled: true,
@@ -493,14 +709,13 @@ const MeetingRoom = () => {
     setConnectionStates((prev) => ({ ...prev, [socketId]: "connected" }));
   };
 
-  // Handle ICE connection state changes
   const handleIceConnectionStateChange = (peerConnection, socketId, userName) => {
     const state = peerConnection.iceConnectionState;
     console.log(`ICE connection state for ${userName}:`, state);
 
     setConnectionStates((prev) => {
       const newState = { ...prev };
-      
+
       switch (state) {
         case "connected":
         case "completed":
@@ -508,7 +723,6 @@ const MeetingRoom = () => {
           break;
         case "disconnected":
           newState[socketId] = "disconnected";
-          // Try to reconnect
           setTimeout(() => {
             if (peerConnection.iceConnectionState === "disconnected") {
               console.log("Attempting ICE restart for:", userName);
@@ -519,7 +733,6 @@ const MeetingRoom = () => {
         case "failed":
           newState[socketId] = "failed";
           setError(`Connection failed with ${userName}. Attempting to reconnect...`);
-          // Attempt to recreate connection
           setTimeout(() => {
             removeParticipant(socketId);
           }, 5000);
@@ -528,19 +741,17 @@ const MeetingRoom = () => {
           newState[socketId] = "closed";
           break;
       }
-      
+
       return newState;
     });
   };
 
-  // Handle connection state changes
   const handleConnectionStateChange = (peerConnection, socketId, userName) => {
     const state = peerConnection.connectionState;
     console.log(`Connection state for ${userName}:`, state);
 
     if (state === "failed") {
       console.log("Connection failed, attempting to reconnect:", userName);
-      // Request renegotiation from remote peer
       socketRef.current.emit("request-renegotiation", {
         to: socketId,
         from: socketRef.current.id,
@@ -548,14 +759,12 @@ const MeetingRoom = () => {
     }
   };
 
-  // Handle offer with proper state management
-  const handleOffer = async (offer, from, userName, userId) => {
+  const handleOffer = async (offer, from, userName, oduserId) => {
     try {
       let peerConnection = peerConnectionsRef.current[from];
 
-      // Create peer connection if it doesn't exist
       if (!peerConnection) {
-        await createPeerConnection(from, userName, userId, false);
+        await createPeerConnection(from, userName, oduserId, false);
         peerConnection = peerConnectionsRef.current[from];
       }
 
@@ -564,7 +773,6 @@ const MeetingRoom = () => {
         return;
       }
 
-      // Handle rollback if necessary
       if (peerConnection.signalingState !== "stable") {
         console.log("Performing rollback before setting remote description");
         await peerConnection.setLocalDescription({ type: "rollback" });
@@ -572,7 +780,6 @@ const MeetingRoom = () => {
 
       await peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
 
-      // Process pending ICE candidates
       if (pendingCandidatesRef.current[from]) {
         for (const candidate of pendingCandidatesRef.current[from]) {
           try {
@@ -591,7 +798,7 @@ const MeetingRoom = () => {
         answer,
         to: from,
         from: socketRef.current.id,
-        userId: user.id,
+        oduserId: user.id,
       });
 
       console.log("Answer sent to:", from);
@@ -601,27 +808,22 @@ const MeetingRoom = () => {
     }
   };
 
-  // Handle answer with state validation
   const handleAnswer = async (answer, from) => {
     try {
       const peerConnection = peerConnectionsRef.current[from];
-      
+
       if (!peerConnection) {
         console.warn("No peer connection found for answer from:", from);
         return;
       }
 
-      // Validate signaling state
       if (peerConnection.signalingState !== "have-local-offer") {
-        console.warn(
-          `Ignoring answer in signaling state: ${peerConnection.signalingState}`
-        );
+        console.warn(`Ignoring answer in signaling state: ${peerConnection.signalingState}`);
         return;
       }
 
       await peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
 
-      // Process pending ICE candidates
       if (pendingCandidatesRef.current[from]) {
         for (const candidate of pendingCandidatesRef.current[from]) {
           try {
@@ -639,7 +841,6 @@ const MeetingRoom = () => {
     }
   };
 
-  // Handle ICE candidate with buffering
   const handleIceCandidate = async (candidate, from) => {
     try {
       const peerConnection = peerConnectionsRef.current[from];
@@ -649,7 +850,6 @@ const MeetingRoom = () => {
         return;
       }
 
-      // Buffer candidates if remote description not set yet
       if (!peerConnection.remoteDescription) {
         console.log("Buffering ICE candidate, no remote description yet");
         if (!pendingCandidatesRef.current[from]) {
@@ -665,7 +865,6 @@ const MeetingRoom = () => {
     }
   };
 
-  // Remove participant with cleanup
   const removeParticipant = (socketId) => {
     console.log("Removing participant:", socketId);
 
@@ -675,21 +874,20 @@ const MeetingRoom = () => {
       delete peerConnectionsRef.current[socketId];
     }
 
-    // Clear pending candidates
     delete pendingCandidatesRef.current[socketId];
 
-    // Remove from connection states
     setConnectionStates((prev) => {
       const newStates = { ...prev };
       delete newStates[socketId];
       return newStates;
     });
 
-    // Remove from participants
     setParticipants((prev) => prev.filter((p) => p.socketId !== socketId));
   };
 
-  // Toggle audio with proper track management
+  // =========================================================================
+  // MEDIA CONTROLS
+  // =========================================================================
   const toggleAudio = async () => {
     if (!localStreamRef.current) return;
 
@@ -698,23 +896,33 @@ const MeetingRoom = () => {
 
     const newState = !isAudioEnabled;
 
-    // Update track state
+    // Method 1: Set track enabled state (affects local stream)
     audioTrack.enabled = newState;
+    
+    // Method 2: Also mute/unmute on all peer connection senders
+    // This ensures the audio is actually stopped from being sent
+    Object.values(peerConnectionsRef.current).forEach((pc) => {
+      if (pc && pc.getSenders) {
+        const audioSender = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'audio'
+        );
+        if (audioSender && audioSender.track) {
+          audioSender.track.enabled = newState;
+        }
+      }
+    });
+    
     setIsAudioEnabled(newState);
+    
+    console.log(`Audio ${newState ? 'enabled' : 'disabled'}`);
 
-    // Notify peers
-    socketRef.current.emit("toggle-media", {
+    socketRef.current?.emit("toggle-media", {
       roomId: meetingId,
       type: "audio",
       enabled: newState,
     });
-
-    // If disabling and we want to stop transmission completely,
-    // we would need to renegotiate (remove/add track)
-    // For now, enabled=false stops audio data transmission
   };
 
-  // Toggle video with proper track management
   const toggleVideo = async () => {
     if (!localStreamRef.current) return;
 
@@ -723,45 +931,35 @@ const MeetingRoom = () => {
 
     const newState = !isVideoEnabled;
 
-    if (newState) {
-      // Re-enable video
-      videoTrack.enabled = true;
-      setIsVideoEnabled(true);
-    } else {
-      // Disable video
-      videoTrack.enabled = false;
-      setIsVideoEnabled(false);
-    }
+    // Method 1: Set track enabled state (affects local stream)
+    videoTrack.enabled = newState;
+    
+    // Method 2: Also enable/disable on all peer connection senders
+    Object.values(peerConnectionsRef.current).forEach((pc) => {
+      if (pc && pc.getSenders) {
+        const videoSender = pc.getSenders().find(sender => 
+          sender.track && sender.track.kind === 'video'
+        );
+        if (videoSender && videoSender.track) {
+          videoSender.track.enabled = newState;
+        }
+      }
+    });
+    
+    setIsVideoEnabled(newState);
+    
+    console.log(`Video ${newState ? 'enabled' : 'disabled'}`);
 
-    // Notify peers
-    socketRef.current.emit("toggle-media", {
+    socketRef.current?.emit("toggle-media", {
       roomId: meetingId,
       type: "video",
       enabled: newState,
     });
-
-    // Optional: For complete track removal/addition (requires renegotiation)
-    // This would prevent any video data transmission
-    /*
-    if (!newState) {
-      // Remove video track from all peer connections
-      Object.values(peerConnectionsRef.current).forEach((pc) => {
-        const senders = pc.getSenders();
-        const videoSender = senders.find(s => s.track?.kind === 'video');
-        if (videoSender) {
-          pc.removeTrack(videoSender);
-        }
-      });
-    } else {
-      // Add video track back to all peer connections
-      Object.values(peerConnectionsRef.current).forEach((pc) => {
-        pc.addTrack(videoTrack, localStreamRef.current);
-      });
-    }
-    */
   };
 
-  // Toggle recording with multi-participant support
+  // =========================================================================
+  // RECORDING
+  // =========================================================================
   const toggleRecording = async () => {
     if (!isRecording) {
       startRecording();
@@ -770,24 +968,20 @@ const MeetingRoom = () => {
     }
   };
 
-  // Start recording - captures all participants
   const startRecording = async () => {
     try {
-      // Create canvas for mixing video streams
       const canvas = document.createElement("canvas");
       canvas.width = 1280;
       canvas.height = 720;
       canvasRef.current = canvas;
       const ctx = canvas.getContext("2d");
 
-      // Create audio context for mixing audio
       const AudioContext = window.AudioContext || window.webkitAudioContext;
       const audioContext = new AudioContext();
       audioContextRef.current = audioContext;
 
       const audioDestination = audioContext.createMediaStreamDestination();
 
-      // Add local audio
       if (localStreamRef.current && isAudioEnabled) {
         const localAudioTrack = localStreamRef.current.getAudioTracks()[0];
         if (localAudioTrack) {
@@ -798,7 +992,6 @@ const MeetingRoom = () => {
         }
       }
 
-      // Add remote audio from all participants
       participants.forEach((participant) => {
         if (participant.stream && participant.isAudioEnabled) {
           const audioTrack = participant.stream.getAudioTracks()[0];
@@ -811,15 +1004,12 @@ const MeetingRoom = () => {
         }
       });
 
-      // Render video frames to canvas
       const videoElements = [];
 
-      // Add local video
       if (localVideoRef.current && isVideoEnabled) {
         videoElements.push(localVideoRef.current);
       }
 
-      // Add remote videos
       participants.forEach((participant) => {
         if (participant.stream && participant.isVideoEnabled) {
           const video = document.createElement("video");
@@ -829,7 +1019,6 @@ const MeetingRoom = () => {
         }
       });
 
-      // Calculate grid layout
       const drawVideoGrid = () => {
         if (!canvasRef.current) return;
 
@@ -858,10 +1047,8 @@ const MeetingRoom = () => {
         }
       };
 
-      // Start rendering
       drawVideoGrid();
 
-      // Create mixed stream
       const canvasStream = canvas.captureStream(30);
       const videoTrack = canvasStream.getVideoTracks()[0];
       const audioTrack = audioDestination.stream.getAudioTracks()[0];
@@ -869,7 +1056,6 @@ const MeetingRoom = () => {
       const mixedStream = new MediaStream([videoTrack, audioTrack]);
       mixedStreamRef.current = mixedStream;
 
-      // Start MediaRecorder
       const options = { mimeType: "video/webm;codecs=vp9,opus" };
       if (!MediaRecorder.isTypeSupported(options.mimeType)) {
         options.mimeType = "video/webm;codecs=vp8,opus";
@@ -897,19 +1083,16 @@ const MeetingRoom = () => {
           type: "video/webm",
         });
 
-        // Get unique participant names
         const uniqueParticipants = Array.from(
           new Set([user.fullName, ...participants.map((p) => p.userName)])
         );
 
-        // Create download link
         const url = URL.createObjectURL(blob);
         const a = document.createElement("a");
         a.href = url;
         a.download = `meeting-${meetingId}-${Date.now()}.webm`;
         a.click();
 
-        // Save recording metadata to backend
         try {
           const formData = new FormData();
           formData.append("recording", blob, a.download);
@@ -927,18 +1110,16 @@ const MeetingRoom = () => {
           setError("Recording saved locally but failed to upload to server");
         }
 
-        // Cleanup
         URL.revokeObjectURL(url);
         if (canvasRef.current) {
           canvasRef.current = null;
         }
       };
 
-      mediaRecorderRef.current.start(1000); // Collect data every second
+      mediaRecorderRef.current.start(1000);
       setIsRecording(true);
 
-      // Notify other participants
-      socketRef.current.emit("recording-status", {
+      socketRef.current?.emit("recording-status", {
         roomId: meetingId,
         isRecording: true,
         userName: user.fullName,
@@ -949,26 +1130,22 @@ const MeetingRoom = () => {
     }
   };
 
-  // Stop recording
   const stopRecording = () => {
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       mediaRecorderRef.current.stop();
       setIsRecording(false);
 
-      // Stop mixed stream
       if (mixedStreamRef.current) {
         mixedStreamRef.current.getTracks().forEach((track) => track.stop());
         mixedStreamRef.current = null;
       }
 
-      // Close audio context
       if (audioContextRef.current) {
         audioContextRef.current.close();
         audioContextRef.current = null;
       }
 
-      // Notify other participants
-      socketRef.current.emit("recording-status", {
+      socketRef.current?.emit("recording-status", {
         roomId: meetingId,
         isRecording: false,
         userName: user.fullName,
@@ -976,14 +1153,16 @@ const MeetingRoom = () => {
     }
   };
 
-  // Leave meeting with proper cleanup
+  // =========================================================================
+  // MEETING ACTIONS
+  // =========================================================================
   const leaveMeeting = () => {
     isLeavingRef.current = true;
 
     if (socketRef.current) {
       socketRef.current.emit("leave-room", {
         roomId: meetingId,
-        userId: user.id,
+        oduserId: user.id,
       });
     }
 
@@ -991,22 +1170,22 @@ const MeetingRoom = () => {
     navigate("/");
   };
 
-  // Copy meeting ID
   const copyMeetingId = () => {
-    const fullMeetingLink = `${window.location.origin}/meeting/${meetingId}`;
+    const fullMeetingLink = `${window.location.origin}/room/${meetingId}`;
     navigator.clipboard.writeText(fullMeetingLink);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // Handle page visibility change (user switches tabs)
+  // =========================================================================
+  // PAGE VISIBILITY & BEFOREUNLOAD HANDLERS
+  // =========================================================================
   useEffect(() => {
     const handleVisibilityChange = () => {
       if (document.hidden) {
         console.log("Page hidden - maintaining connections");
       } else {
         console.log("Page visible - checking connections");
-        // Could add connection health check here
       }
     };
 
@@ -1017,7 +1196,6 @@ const MeetingRoom = () => {
     };
   }, []);
 
-  // Handle beforeunload (user closes tab/browser)
   useEffect(() => {
     const handleBeforeUnload = (e) => {
       if (isRecording) {
@@ -1034,6 +1212,9 @@ const MeetingRoom = () => {
     };
   }, [isRecording]);
 
+  // =========================================================================
+  // RENDER - Loading State
+  // =========================================================================
   if (isInitializing) {
     return (
       <div className="meeting-room-loading">
@@ -1043,6 +1224,79 @@ const MeetingRoom = () => {
     );
   }
 
+  // =========================================================================
+  // RENDER - Waiting Room (for non-approved users)
+  // =========================================================================
+  if (
+    admissionStatus === AdmissionStatus.WAITING ||
+    admissionStatus === AdmissionStatus.REQUESTING
+  ) {
+    return (
+      <WaitingScreen
+        status={admissionStatus}
+        message={waitingMessage}
+        meetingId={meetingId}
+        userName={user.fullName}
+        onCancel={() => {
+          cleanup();
+          navigate("/");
+        }}
+        localVideoRef={localVideoRef}
+        isVideoEnabled={isVideoEnabled}
+        isAudioEnabled={isAudioEnabled}
+        onToggleVideo={toggleVideo}
+        onToggleAudio={toggleAudio}
+      />
+    );
+  }
+
+  // =========================================================================
+  // RENDER - Denied Screen
+  // =========================================================================
+  if (admissionStatus === AdmissionStatus.DENIED) {
+    return <DeniedScreen reason={denyReason} onGoBack={() => navigate("/")} />;
+  }
+
+  // =========================================================================
+  // RENDER - Expired Screen
+  // =========================================================================
+  if (admissionStatus === AdmissionStatus.EXPIRED) {
+    return (
+      <ExpiredScreen
+        message={waitingMessage}
+        onRetry={() => {
+          admissionRequestSentRef.current = false;
+          setAdmissionStatus(AdmissionStatus.INITIALIZING);
+          if (socketRef.current?.connected) {
+            socketRef.current.emit("request-join-room", {
+              roomId: meetingId,
+              oduserId: user.id,
+              userName: user.fullName,
+              isRejoin: false,
+            });
+          }
+        }}
+        onGoBack={() => navigate("/")}
+      />
+    );
+  }
+
+  // =========================================================================
+  // RENDER - Error State
+  // =========================================================================
+  if (admissionStatus === AdmissionStatus.ERROR) {
+    return (
+      <ErrorScreen
+        error={error}
+        onRetry={() => window.location.reload()}
+        onGoBack={() => navigate("/")}
+      />
+    );
+  }
+
+  // =========================================================================
+  // RENDER - Main Meeting Room
+  // =========================================================================
   return (
     <div className="meeting-room">
       {error && (
@@ -1059,16 +1313,38 @@ const MeetingRoom = () => {
           <h2 className="meeting-title">Meeting Room</h2>
           <button onClick={copyMeetingId} className="meeting-id-btn">
             {copied ? <Check size={16} /> : <Copy size={16} />}
-            <span>
-              {copied ? "Link copied!" : `Meeting ID: ${meetingId.substring(0, 8)}...`}
-            </span>
+            <span>{copied ? "Link copied!" : `ID: ${meetingId.substring(0, 8)}...`}</span>
           </button>
         </div>
+
+        {isHost && (
+          <div className="host-controls">
+            <button
+              onClick={() => setShowWaitingRoom(!showWaitingRoom)}
+              className={`waiting-room-toggle ${pendingRequests.length > 0 ? "has-requests" : ""}`}
+            >
+              <Users size={20} />
+              {pendingRequests.length > 0 && (
+                <span className="request-badge">{pendingRequests.length}</span>
+              )}
+              <span>Waiting Room</span>
+            </button>
+          </div>
+        )}
       </div>
+
+      {isHost && showWaitingRoom && (
+        <WaitingRoomPanel
+          pendingRequests={pendingRequests}
+          onApprove={approveJoinRequest}
+          onDeny={denyJoinRequest}
+          onAdmitAll={admitAllWaiting}
+          onClose={() => setShowWaitingRoom(false)}
+        />
+      )}
 
       <div className="meeting-content">
         <div className="participants-grid">
-          {/* Local video */}
           <div className="participant-card local">
             <video
               ref={localVideoRef}
@@ -1085,12 +1361,13 @@ const MeetingRoom = () => {
               </div>
             )}
             <div className="participant-info">
-              <span className="participant-name">You</span>
+              <span className="participant-name">
+                You {isHost && <Shield size={12} className="host-badge" />}
+              </span>
               {!isAudioEnabled && <MicOff size={14} className="muted-icon" />}
             </div>
           </div>
 
-          {/* Remote participants */}
           {participants
             .filter((participant) => participant.stream)
             .map((participant) => (
@@ -1150,7 +1427,230 @@ const MeetingRoom = () => {
   );
 };
 
-// Participant card component with connection state
+// ============================================================================
+// WAITING SCREEN COMPONENT
+// ============================================================================
+const WaitingScreen = ({
+  status,
+  message,
+  meetingId,
+  userName,
+  onCancel,
+  localVideoRef,
+  isVideoEnabled,
+  isAudioEnabled,
+  onToggleVideo,
+  onToggleAudio,
+}) => {
+  return (
+    <div className="waiting-screen">
+      <div className="waiting-container">
+        <div className="waiting-preview">
+          <video
+            ref={localVideoRef}
+            autoPlay
+            muted
+            playsInline
+            className={`preview-video ${!isVideoEnabled ? "hidden" : ""}`}
+          />
+          {!isVideoEnabled && (
+            <div className="preview-placeholder">
+              <div className="preview-avatar">{userName.charAt(0).toUpperCase()}</div>
+            </div>
+          )}
+          <div className="preview-controls">
+            <button
+              onClick={onToggleAudio}
+              className={`preview-btn ${!isAudioEnabled ? "off" : ""}`}
+            >
+              {isAudioEnabled ? <Mic size={20} /> : <MicOff size={20} />}
+            </button>
+            <button
+              onClick={onToggleVideo}
+              className={`preview-btn ${!isVideoEnabled ? "off" : ""}`}
+            >
+              {isVideoEnabled ? <VideoIcon size={20} /> : <VideoOff size={20} />}
+            </button>
+          </div>
+        </div>
+
+        <div className="waiting-info">
+          <div className="waiting-icon">
+            {status === AdmissionStatus.REQUESTING ? (
+              <Loader2 size={48} className="spin" />
+            ) : (
+              <Clock size={48} />
+            )}
+          </div>
+          <h2 className="waiting-title">
+            {status === AdmissionStatus.REQUESTING
+              ? "Connecting..."
+              : "Waiting to be admitted"}
+          </h2>
+          <p className="waiting-message">{message}</p>
+          <p className="waiting-meeting-id">Meeting ID: {meetingId.substring(0, 8)}...</p>
+
+          <div className="waiting-tips">
+            <p>💡 The host will let you in soon</p>
+            <p>📹 Make sure your camera and mic are working</p>
+          </div>
+
+          <button onClick={onCancel} className="waiting-cancel-btn">
+            Cancel and go back
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// DENIED SCREEN COMPONENT
+// ============================================================================
+const DeniedScreen = ({ reason, onGoBack }) => {
+  return (
+    <div className="denied-screen">
+      <div className="denied-container">
+        <div className="denied-icon">
+          <XCircle size={64} />
+        </div>
+        <h2 className="denied-title">Access Denied</h2>
+        <p className="denied-reason">{reason}</p>
+        <button onClick={onGoBack} className="denied-btn">
+          Go to Homepage
+        </button>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// EXPIRED SCREEN COMPONENT
+// ============================================================================
+const ExpiredScreen = ({ message, onRetry, onGoBack }) => {
+  return (
+    <div className="expired-screen">
+      <div className="expired-container">
+        <div className="expired-icon">
+          <AlertCircle size={64} />
+        </div>
+        <h2 className="expired-title">Request Expired</h2>
+        <p className="expired-message">{message}</p>
+        <div className="expired-actions">
+          <button onClick={onRetry} className="retry-btn">
+            Try Again
+          </button>
+          <button onClick={onGoBack} className="back-btn">
+            Go to Homepage
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// ERROR SCREEN COMPONENT
+// ============================================================================
+const ErrorScreen = ({ error, onRetry, onGoBack }) => {
+  return (
+    <div className="error-screen">
+      <div className="error-container">
+        <div className="error-icon">
+          <XCircle size={64} />
+        </div>
+        <h2 className="error-title">Something went wrong</h2>
+        <p className="error-message">{error}</p>
+        <div className="error-actions">
+          <button onClick={onRetry} className="retry-btn">
+            Refresh Page
+          </button>
+          <button onClick={onGoBack} className="back-btn">
+            Go to Homepage
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+// ============================================================================
+// WAITING ROOM PANEL COMPONENT (Host View)
+// ============================================================================
+const WaitingRoomPanel = ({ pendingRequests, onApprove, onDeny, onAdmitAll, onClose }) => {
+  const formatWaitTime = (requestedAt) => {
+    const seconds = Math.floor((Date.now() - requestedAt) / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes}m`;
+  };
+
+  return (
+    <div className="waiting-room-panel">
+      <div className="waiting-room-header">
+        <h3>
+          <Users size={20} />
+          Waiting Room ({pendingRequests.length})
+        </h3>
+        <button onClick={onClose} className="close-panel-btn">
+          <X size={20} />
+        </button>
+      </div>
+
+      {pendingRequests.length === 0 ? (
+        <div className="waiting-room-empty">
+          <UserPlus size={32} />
+          <p>No one is waiting to join</p>
+        </div>
+      ) : (
+        <>
+          <div className="waiting-room-actions">
+            <button onClick={onAdmitAll} className="admit-all-btn">
+              <UserCheck size={16} />
+              Admit All
+            </button>
+          </div>
+
+          <div className="waiting-room-list">
+            {pendingRequests.map((request) => (
+              <div key={request.oduserId} className="waiting-user">
+                <div className="waiting-user-avatar">
+                  {request.userName.charAt(0).toUpperCase()}
+                </div>
+                <div className="waiting-user-info">
+                  <span className="waiting-user-name">{request.userName}</span>
+                  <span className="waiting-user-time">
+                    Waiting {formatWaitTime(request.requestedAt)}
+                  </span>
+                </div>
+                <div className="waiting-user-actions">
+                  <button
+                    onClick={() => onApprove(request.oduserId)}
+                    className="approve-btn"
+                    title="Admit"
+                  >
+                    <CheckCircle size={20} />
+                  </button>
+                  <button
+                    onClick={() => onDeny(request.oduserId)}
+                    className="deny-btn"
+                    title="Deny"
+                  >
+                    <XCircle size={20} />
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
+
+// ============================================================================
+// PARTICIPANT CARD COMPONENT
+// ============================================================================
 const ParticipantCard = ({ participant, connectionState }) => {
   const videoRef = useRef(null);
 
@@ -1166,9 +1666,7 @@ const ParticipantCard = ({ participant, connectionState }) => {
         ref={videoRef}
         autoPlay
         playsInline
-        className={`participant-video ${
-          !participant.isVideoEnabled ? "hidden" : ""
-        }`}
+        className={`participant-video ${!participant.isVideoEnabled ? "hidden" : ""}`}
       />
       {!participant.isVideoEnabled && (
         <div className="participant-placeholder">
@@ -1179,11 +1677,8 @@ const ParticipantCard = ({ participant, connectionState }) => {
       )}
       <div className="participant-info">
         <span className="participant-name">{participant.userName}</span>
-        {!participant.isAudioEnabled && (
-          <MicOff size={14} className="muted-icon" />
-        )}
+        {!participant.isAudioEnabled && <MicOff size={14} className="muted-icon" />}
       </div>
-      {/* Connection state indicator (optional, can be styled) */}
       {connectionState && connectionState !== "connected" && (
         <div className="connection-indicator" title={connectionState}>
           {connectionState === "connecting" && "⏳"}
