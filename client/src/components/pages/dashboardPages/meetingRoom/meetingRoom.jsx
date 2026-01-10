@@ -1310,27 +1310,29 @@ const MeetingRoom = () => {
 
       <div className="meeting-header">
         <div className="meeting-info">
-          <h2 className="meeting-title">Meeting Room</h2>
-          <button onClick={copyMeetingId} className="meeting-id-btn">
-            {copied ? <Check size={16} /> : <Copy size={16} />}
-            <span>{copied ? "Link copied!" : `ID: ${meetingId.substring(0, 8)}...`}</span>
-          </button>
-        </div>
-
-        {isHost && (
-          <div className="host-controls">
-            <button
-              onClick={() => setShowWaitingRoom(!showWaitingRoom)}
-              className={`waiting-room-toggle ${pendingRequests.length > 0 ? "has-requests" : ""}`}
-            >
-              <Users size={20} />
-              {pendingRequests.length > 0 && (
-                <span className="request-badge">{pendingRequests.length}</span>
-              )}
-              <span>Waiting Room</span>
+          <div className="meeting-info-left">
+            <h2 className="meeting-title">Meeting Room</h2>
+            <button onClick={copyMeetingId} className="meeting-id-btn">
+              {copied ? <Check size={16} /> : <Copy size={16} />}
+              <span>{copied ? "Link copied!" : `ID: ${meetingId.substring(0, 8)}...`}</span>
             </button>
           </div>
-        )}
+
+          {isHost && (
+            <div className="host-controls">
+              <button
+                onClick={() => setShowWaitingRoom(!showWaitingRoom)}
+                className={`waiting-room-toggle ${pendingRequests.length > 0 ? "has-requests" : ""}`}
+              >
+                <Users size={20} />
+                {pendingRequests.length > 0 && (
+                  <span className="request-badge">{pendingRequests.length}</span>
+                )}
+                <span>Waiting Room</span>
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       {isHost && showWaitingRoom && (
