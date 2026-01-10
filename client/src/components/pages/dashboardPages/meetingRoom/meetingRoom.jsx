@@ -19,11 +19,14 @@ import {
   CheckCircle,
   XCircle,
   AlertCircle,
+  MessageCircle,
 } from "lucide-react";
 import { io } from "socket.io-client";
 import "./style.css";
 import api from "../../../request";
 import { useApp } from "../../../../context/context";
+import RoomMessaging from "../../../dashboardComponents/roomMessaging/roomMessaging";
+
 
 // ============================================================================
 // CONSTANTS
@@ -91,6 +94,8 @@ const MeetingRoom = () => {
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
   const [isInitializing, setIsInitializing] = useState(true);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatUnreadCount, setChatUnreadCount] = useState(0);
 
   // -------------------------------------------------------------------------
   // STATE - Admission Control (NEW)
@@ -1416,6 +1421,18 @@ const MeetingRoom = () => {
           </button>
 
           <button
+            onClick={() => setIsChatOpen(!isChatOpen)}
+            className={`control-btn ${isChatOpen ? "active" : ""}`}
+            aria-label={isChatOpen ? "Close chat" : "Open chat"}
+            title={isChatOpen ? "Close chat" : "Open chat"}
+          >
+            <MessageCircle size={24} />
+            {!isChatOpen && chatUnreadCount > 0 && (
+              <span className="control-badge">{chatUnreadCount > 99 ? '99+' : chatUnreadCount}</span>
+            )}
+          </button>
+
+          <button
             onClick={leaveMeeting}
             className="control-btn leave"
             aria-label="Leave meeting"
@@ -1425,6 +1442,17 @@ const MeetingRoom = () => {
           </button>
         </div>
       </div>
+
+      {/* Room Messaging Component */}
+      <RoomMessaging
+        meetingId={meetingId}
+        userId={user.id}
+        userName={user.fullName}
+        socketRef={socketRef}
+        isOpen={isChatOpen}
+        setIsOpen={setIsChatOpen}
+        onUnreadCountChange={setChatUnreadCount}
+      />
     </div>
   );
 };

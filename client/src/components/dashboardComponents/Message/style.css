@@ -1,0 +1,324 @@
+/* Message wrapper with slide-in animation */
+.message-wrapper {
+  display: flex;
+  gap: var(--spacing-sm);
+  margin-bottom: var(--spacing-md);
+  animation: slideInMessage 0.3s ease-out;
+  opacity: 0;
+  animation-fill-mode: forwards;
+}
+
+@keyframes slideInMessage {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message-wrapper.own-message {
+  flex-direction: row-reverse;
+  justify-content: flex-start;
+}
+
+.message-wrapper.other-message {
+  flex-direction: row;
+  justify-content: flex-start;
+}
+
+/* Avatar */
+.message-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--radius-full);
+  background: var(--gradient-brand);
+  color: var(--text-inverse);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  flex-shrink: 0;
+  box-shadow: var(--shadow-sm);
+}
+
+/* Content wrapper */
+.message-content-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+  max-width: 70%;
+  min-width: 120px;
+}
+
+.own-message .message-content-wrapper {
+  align-items: flex-end;
+}
+
+.other-message .message-content-wrapper {
+  align-items: flex-start;
+}
+
+/* Sender name */
+.message-sender-name {
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  padding-left: var(--spacing-xs);
+}
+
+/* Bubble container with actions */
+.message-bubble-container {
+  display: flex;
+  gap: var(--spacing-xs);
+  align-items: flex-end;
+  position: relative;
+}
+
+.own-message .message-bubble-container {
+  flex-direction: row-reverse;
+}
+
+/* Message bubble */
+.message-bubble {
+  padding: var(--spacing-sm) var(--spacing-md);
+  border-radius: var(--radius-lg);
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition-base);
+  position: relative;
+}
+
+.message-bubble.own {
+  background: var(--gradient-brand);
+  color: var(--text-inverse);
+  border-bottom-right-radius: var(--spacing-xs);
+}
+
+.message-bubble.other {
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  border: 1px solid var(--border-default);
+  border-bottom-left-radius: var(--spacing-xs);
+}
+
+.message-bubble:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+/* Message text */
+.message-text {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+/* Message metadata */
+.message-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  margin-top: var(--spacing-xs);
+}
+
+.message-time {
+  font-size: var(--font-size-xs);
+  opacity: 0.7;
+}
+
+.message-edited {
+  font-size: var(--font-size-xs);
+  font-style: italic;
+  opacity: 0.6;
+}
+
+/* Message actions */
+.message-actions {
+  position: relative;
+  opacity: 0;
+  transition: opacity var(--transition-fast);
+}
+
+.message-bubble-container:hover .message-actions {
+  opacity: 1;
+}
+
+.message-menu-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  padding: var(--spacing-xs);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+}
+
+.message-menu-btn:hover {
+  background: var(--bg-muted);
+  color: var(--text-primary);
+}
+
+/* Menu dropdown */
+.message-menu {
+  position: absolute;
+  bottom: 100%;
+  right: 0;
+  margin-bottom: var(--spacing-xs);
+  background: var(--bg-surface);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  z-index: var(--z-dropdown);
+  animation: slideInMenu 0.2s ease-out;
+}
+
+@keyframes slideInMenu {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: var(--spacing-sm) var(--spacing-md);
+  background: transparent;
+  border: none;
+  color: var(--text-primary);
+  font-size: var(--font-size-sm);
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--transition-fast);
+  white-space: nowrap;
+}
+
+.menu-item:hover {
+  background: var(--bg-muted);
+}
+
+.menu-item.delete {
+  color: var(--color-danger);
+}
+
+.menu-item.delete:hover {
+  background: rgba(244, 63, 94, 0.1);
+}
+
+/* Edit form */
+.message-edit-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-sm);
+  width: 100%;
+}
+
+.message-edit-input {
+  width: 100%;
+  min-width: 200px;
+  padding: var(--spacing-sm);
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: var(--radius-sm);
+  color: var(--text-inverse);
+  font-size: var(--font-size-sm);
+  font-family: var(--font-family);
+  resize: vertical;
+  transition: all var(--transition-fast);
+}
+
+.message-edit-input:focus {
+  outline: none;
+  border-color: rgba(255, 255, 255, 0.4);
+  background: rgba(255, 255, 255, 0.15);
+}
+
+.message-edit-input::placeholder {
+  color: rgba(255, 255, 255, 0.5);
+}
+
+.message-edit-actions {
+  display: flex;
+  gap: var(--spacing-xs);
+  justify-content: flex-end;
+}
+
+.edit-action-btn {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  padding: var(--spacing-xs) var(--spacing-sm);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-xs);
+  font-weight: 500;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  border: none;
+}
+
+.edit-action-btn.save {
+  background: rgba(255, 255, 255, 0.2);
+  color: var(--text-inverse);
+}
+
+.edit-action-btn.save:hover {
+  background: rgba(255, 255, 255, 0.3);
+}
+
+.edit-action-btn.cancel {
+  background: transparent;
+  color: var(--text-inverse);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+}
+
+.edit-action-btn.cancel:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Dark mode adjustments */
+[data-theme="dark"] .message-bubble.other {
+  background: var(--bg-muted);
+  border-color: var(--border-muted);
+}
+
+[data-theme="dark"] .message-menu {
+  background: var(--bg-muted);
+  border-color: var(--border-muted);
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .message-content-wrapper {
+    max-width: 85%;
+  }
+
+  .message-avatar {
+    width: 28px;
+    height: 28px;
+    font-size: 0.65rem;
+  }
+
+  .message-bubble {
+    padding: var(--spacing-xs) var(--spacing-sm);
+  }
+
+  .message-text {
+    font-size: 0.8125rem;
+  }
+}

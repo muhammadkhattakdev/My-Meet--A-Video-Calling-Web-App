@@ -9,6 +9,7 @@ import path from 'path';
 import fs from 'fs';
 import authRoutes from './routes/auth.js';
 import meetingRoutes from './routes/meeting.js';
+import messageRoutes from './routes/message.js';
 
 // Load environment variables
 dotenv.config();
@@ -69,6 +70,7 @@ const upload = multer({
 // Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/meetings', meetingRoutes);
+app.use('/api/messages', messageRoutes);
 
 // Recording upload endpoint
 app.post('/api/meetings/:meetingId/upload-recording', 
