@@ -140,6 +140,10 @@ const deniedUsers = new Map();
 // Structure: Map<socketId, { oduserId, oduserId, roomId }>
 const socketUserMap = new Map();
 
+// NEW: Store transcription history per room (for late joiners & reconnections)
+// Structure: Map<roomId, Array<{id, userId, userName, text, timestamp, secondsIntoMeeting, confidence}>>
+const transcriptionHistory = new Map();
+
 // Request timeout duration (5 minutes)
 const REQUEST_TIMEOUT = 5 * 60 * 1000;
 
@@ -285,6 +289,7 @@ const cleanupRoom = (roomId) => {
   approvedUsers.delete(roomId);
   pendingJoinRequests.delete(roomId);
   deniedUsers.delete(roomId);
+  transcriptionHistory.delete(roomId);
   console.log(`Room ${roomId} cleaned up completely`);
 };
 
@@ -783,6 +788,16 @@ io.on('connection', (socket) => {
     // Notify the new user about existing participants
     socket.emit('existing-participants', otherParticipants);
     
+    // Send transcription history to joining user
+    const history = transcriptionHistory.get(roomId) || [];
+    if (history.length > 0) {
+      socket.emit('transcription-history', {
+        entries: history,
+        count: history.length,
+      });
+      console.log(`📜 Sent ${history.length} transcription entries to ${userName}`);
+    }
+    
     // If this user is the host, send any pending requests
     if (userIsHost) {
       const pendingRequests = getPendingRequests(roomId);
@@ -910,19 +925,72 @@ io.on('connection', (socket) => {
   // -------------------------------------------------------------------------
   // Transcription events
   // -------------------------------------------------------------------------
-  socket.on('transcription-entry', ({ roomId, userId, userName, text, timestamp, secondsIntoMeeting, confidence }) => {
-    console.log(`Transcription entry from ${userName} in room ${roomId}`);
+  // -------------------------------------------------------------------------
+  // Transcription events (FIXED VERSION)
+  // -------------------------------------------------------------------------
+  
+  // FINAL transcription entry (completed sentence)
+  socket.on('transcription-entry', ({ roomId, userId, userName, text, timestamp, secondsIntoMeeting, confidence, id }) => {
+    console.log(`✅ FINAL transcription from ${userName}: "${text}"`);
     
-    // Broadcast to all participants in the room (including sender for confirmation)
-    io.to(roomId).emit('transcription-update', {
-      userId,
-      userName,
+    // CRITICAL: Generate ID on backend to ensure uniqueness across all clients
+    const uniqueId = `${Date.now()}-${socket.id.substring(0, 8)}-${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Create the entry object with sender's original data
+    const entry = {
+      id: uniqueId,  // Backend-generated unique ID
+      userId,        // From SENDER, not socket.id
+      userName,      // From SENDER, not socket.id
       text,
       timestamp,
       secondsIntoMeeting,
       confidence,
-      socketId: socket.id,
+      isFinal: true,
+    };
+    
+    console.log('🔍 [BACKEND] Created entry with unique ID:', {
+      id: entry.id,
+      userId: entry.userId,
+      userName: entry.userName,
+      text: entry.text
     });
+    
+    // Store in history for this room
+    if (!transcriptionHistory.has(roomId)) {
+      transcriptionHistory.set(roomId, []);
+    }
+    transcriptionHistory.get(roomId).push(entry);
+    
+    // BROADCAST TO ALL (including sender) - sender doesn't add locally anymore
+    io.to(roomId).emit('transcription-update', entry);
+    
+    console.log(`📊 Room ${roomId} now has ${transcriptionHistory.get(roomId).length} entries`);
+  });
+
+  // INTERIM transcription update (real-time typing)
+  socket.on('transcription-interim', ({ roomId, userId, userName, text, timestamp }) => {
+    // Broadcast to other participants (using SENDER's data)
+    socket.to(roomId).emit('transcription-interim', {
+      userId,      // From SENDER
+      userName,    // From SENDER
+      text,
+      timestamp,
+      isInterim: true,
+    });
+  });
+  
+  // Request transcription history (for late joiners & reconnections)
+  socket.on('request-transcription-history', ({ roomId }) => {
+    console.log(`📜 Transcription history requested for room ${roomId}`);
+    
+    const history = transcriptionHistory.get(roomId) || [];
+    
+    socket.emit('transcription-history', {
+      entries: history,
+      count: history.length,
+    });
+    
+    console.log(`📤 Sent ${history.length} transcription entries to ${socket.id}`);
   });
 
   // Share meeting start time with new joiners

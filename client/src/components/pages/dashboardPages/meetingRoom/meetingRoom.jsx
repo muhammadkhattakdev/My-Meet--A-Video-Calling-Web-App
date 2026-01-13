@@ -38,6 +38,10 @@ const ICE_GATHERING_TIMEOUT = 10000;
 const PEER_CONNECTION_TIMEOUT = 30000;
 const WAITING_ROOM_POLL_INTERVAL = 30000;
 
+// Transcription constants
+const INTERIM_UPDATE_THROTTLE = 100; // ms - throttle interim updates
+const FINAL_RESULT_DEBOUNCE = 300; // ms - debounce final results
+
 // ============================================================================
 // ADMISSION STATUS ENUM
 // ============================================================================
@@ -102,16 +106,21 @@ const MeetingRoom = () => {
   const [isTranscriptionOpen, setIsTranscriptionOpen] = useState(false);
 
   // -------------------------------------------------------------------------
-  // STATE - Transcription
+  // STATE - Transcription (IMPROVED)
   // -------------------------------------------------------------------------
-  const transcriptionEntriesRef = useRef([]); // Complete history
-  const recognitionRef = useRef(null); // Speech recognition instance
-  const meetingStartTimeRef = useRef(null); // Meeting start timestamp
-  const transcriptionBufferRef = useRef(''); // Buffer for continuous speech
-  const bufferTimeoutRef = useRef(null); // Timeout for finalizing buffer
+  const [transcriptionEntries, setTranscriptionEntries] = useState([]); // React state for UI updates
+  const transcriptionEntriesRef = useRef([]); // Ref for stable access
+  const recognitionRef = useRef(null);
+  const meetingStartTimeRef = useRef(null);
+  
+  // NEW: Track interim transcriptions per user
+  const interimTranscriptionsRef = useRef(new Map()); // Map<userId, {text, lastUpdate}>
+  const finalResultTimeoutRef = useRef(null);
+  const interimUpdateTimeoutRef = useRef(null);
+  const isTranscriptionActiveRef = useRef(false);
 
   // -------------------------------------------------------------------------
-  // STATE - Admission Control (NEW)
+  // STATE - Admission Control
   // -------------------------------------------------------------------------
   const [admissionStatus, setAdmissionStatus] = useState(AdmissionStatus.INITIALIZING);
   const [isHost, setIsHost] = useState(false);
@@ -135,6 +144,81 @@ const MeetingRoom = () => {
   };
 
   // =========================================================================
+  // TRANSCRIPTION - ADD ENTRY HELPER
+  // =========================================================================
+  const addTranscriptionEntry = useCallback((entry) => {
+    console.log('🔍 [addTranscriptionEntry] Before add:', {
+      currentCount: transcriptionEntriesRef.current.length,
+      newEntry: {
+        userId: entry.userId,
+        userName: entry.userName,
+        text: entry.text
+      }
+    });
+
+    // Deep copy entry to prevent any mutation
+    const entryCopy = {
+      ...entry,
+      userId: entry.userId,      // Ensure not mutated
+      userName: entry.userName,  // Ensure not mutated
+    };
+
+    // Add to ref (stable reference)
+    transcriptionEntriesRef.current = [...transcriptionEntriesRef.current, entryCopy];
+    
+    console.log('🔍 [addTranscriptionEntry] After add:', {
+      newCount: transcriptionEntriesRef.current.length,
+      allEntries: transcriptionEntriesRef.current.map(e => ({
+        userId: e.userId,
+        userName: e.userName,
+        text: e.text.substring(0, 20)
+      }))
+    });
+
+    // Update state (triggers re-render)
+    setTranscriptionEntries(prev => [...prev, entryCopy]);
+    
+    console.log(`📝 Added transcription entry: [${entryCopy.secondsIntoMeeting}s] ${entryCopy.userName}: ${entryCopy.text}`);
+  }, []);
+
+  // =========================================================================
+  // TRANSCRIPTION - UPDATE INTERIM HELPER
+  // =========================================================================
+  const updateInterimTranscription = useCallback((userId, userName, interimText) => {
+    if (!interimText || !interimText.trim()) {
+      // Clear interim for this user
+      interimTranscriptionsRef.current.delete(userId);
+      setTranscriptionEntries(prev => [...transcriptionEntriesRef.current]); // Force re-render without interim
+      return;
+    }
+
+    // Update interim map
+    interimTranscriptionsRef.current.set(userId, {
+      userId,
+      userName,
+      text: interimText.trim(),
+      lastUpdate: Date.now(),
+      isInterim: true,
+    });
+
+    // Throttled state update
+    if (!interimUpdateTimeoutRef.current) {
+      interimUpdateTimeoutRef.current = setTimeout(() => {
+        setTranscriptionEntries(prev => [...transcriptionEntriesRef.current]);
+        interimUpdateTimeoutRef.current = null;
+      }, INTERIM_UPDATE_THROTTLE);
+    }
+  }, []);
+
+  // =========================================================================
+  // TRANSCRIPTION - CLEAR INTERIM HELPER
+  // =========================================================================
+  const clearInterimTranscription = useCallback((userId) => {
+    interimTranscriptionsRef.current.delete(userId);
+    setTranscriptionEntries(prev => [...transcriptionEntriesRef.current]);
+  }, []);
+
+  // =========================================================================
   // CLEANUP FUNCTION
   // =========================================================================
   const cleanup = useCallback(() => {
@@ -142,7 +226,6 @@ const MeetingRoom = () => {
 
     // Save transcription before leaving (host only)
     if (isHost && transcriptionEntriesRef.current.length > 0) {
-      // Save inline to avoid hoisting issues
       (async () => {
         try {
           console.log('💾 Saving transcription...');
@@ -160,6 +243,7 @@ const MeetingRoom = () => {
     }
 
     // Stop speech recognition
+    isTranscriptionActiveRef.current = false;
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -167,6 +251,14 @@ const MeetingRoom = () => {
       } catch (err) {
         console.warn('Error stopping recognition in cleanup:', err);
       }
+    }
+
+    // Clear timeouts
+    if (finalResultTimeoutRef.current) {
+      clearTimeout(finalResultTimeoutRef.current);
+    }
+    if (interimUpdateTimeoutRef.current) {
+      clearTimeout(interimUpdateTimeoutRef.current);
     }
 
     if (isRecording && mediaRecorderRef.current) {
@@ -276,7 +368,6 @@ const MeetingRoom = () => {
     let audioContext = null;
     let rafId = null;
 
-    // Delay initialization to not block meeting start
     const timeoutId = setTimeout(() => {
       try {
         audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -292,7 +383,6 @@ const MeetingRoom = () => {
           analyser.getByteFrequencyData(dataArray);
           const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
           
-          // Threshold for speaking detection (adjust if needed)
           const isSpeaking = average > 20;
           setIsLocalUserSpeaking(isSpeaking);
 
@@ -303,7 +393,7 @@ const MeetingRoom = () => {
       } catch (err) {
         console.warn('Failed to initialize audio detection:', err);
       }
-    }, 1000); // Delay 1 second to let meeting start smoothly
+    }, 1000);
 
     return () => {
       clearTimeout(timeoutId);
@@ -316,13 +406,12 @@ const MeetingRoom = () => {
         }
       }
     };
-  }, [isAudioEnabled]); // Removed localStreamRef.current from deps
+  }, [isAudioEnabled]);
 
   // =========================================================================
   // AUDIO LEVEL DETECTION FOR REMOTE PARTICIPANTS
   // =========================================================================
   useEffect(() => {
-    // Delay to avoid blocking meeting start
     const timeoutId = setTimeout(() => {
       const audioContexts = new Map();
       const rafIds = new Map();
@@ -374,7 +463,6 @@ const MeetingRoom = () => {
         }
       });
 
-      // Cleanup function
       return () => {
         rafIds.forEach((rafId) => cancelAnimationFrame(rafId));
         audioContexts.forEach((context) => {
@@ -385,12 +473,12 @@ const MeetingRoom = () => {
           }
         });
       };
-    }, 1500); // 1.5 second delay for remote participants
+    }, 1500);
 
     return () => {
       clearTimeout(timeoutId);
     };
-  }, [participants.length]); // Only re-run when participant count changes
+  }, [participants.length]);
 
   // =========================================================================
   // TRANSCRIPTION - SET MEETING START TIME
@@ -400,7 +488,6 @@ const MeetingRoom = () => {
       meetingStartTimeRef.current = Date.now();
       console.log('📅 Meeting start time recorded:', meetingStartTimeRef.current);
       
-      // If host, share meeting start time via socket
       if (isHost && socketRef.current) {
         socketRef.current.emit('set-meeting-start-time', {
           roomId: meetingId,
@@ -411,22 +498,22 @@ const MeetingRoom = () => {
   }, [admissionStatus, isHost, meetingId]);
 
   // =========================================================================
-  // TRANSCRIPTION - AUTO-START SPEECH RECOGNITION
+  // TRANSCRIPTION - AUTO-START SPEECH RECOGNITION (IMPROVED)
   // =========================================================================
   useEffect(() => {
-    // Only start if approved, have local stream, and socket is connected
+    // Only start if approved, have local stream, socket connected, and not already running
     if (
       admissionStatus !== AdmissionStatus.APPROVED ||
       !localStreamRef.current ||
       !socketRef.current ||
-      recognitionRef.current
+      recognitionRef.current ||
+      !meetingStartTimeRef.current
     ) {
       return;
     }
 
-    // Delay transcription start to not block meeting initialization
+    // Delay transcription start
     const timeoutId = setTimeout(() => {
-      // Check browser support
       const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
       
       if (!SpeechRecognition) {
@@ -434,88 +521,162 @@ const MeetingRoom = () => {
         return;
       }
 
-      const recognition = new SpeechRecognition();
-      recognition.continuous = true;
-      recognition.interimResults = true;
-      recognition.lang = navigator.language || 'en-US';
-      recognition.maxAlternatives = 1;
+      try {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true; // CRITICAL: Enable interim results
+        recognition.lang = navigator.language || 'en-US';
+        recognition.maxAlternatives = 1;
 
-      // Handle transcription results
-      recognition.onresult = (event) => {
-        const result = event.results[event.results.length - 1];
-        const transcript = result[0].transcript;
+        let currentInterimText = '';
+        let lastFinalResultTime = 0;
 
-        if (result.isFinal) {
-          // Final result - send to socket
-          const now = Date.now();
-          const secondsIntoMeeting = Math.floor((now - meetingStartTimeRef.current) / 1000);
+        // Handle transcription results (IMPROVED)
+        recognition.onresult = (event) => {
+          try {
+            const resultIndex = event.resultIndex;
+            const result = event.results[resultIndex];
+            
+            if (!result) return;
 
-          const entry = {
-            id: `${now}-${Math.random()}`,
-            userId: user.id,
-            userName: user.fullName,
-            text: transcript.trim(),
-            timestamp: now,
-            secondsIntoMeeting,
-            confidence: result[0].confidence || 1,
-          };
+            const transcript = result[0].transcript;
+            const confidence = result[0].confidence || 1;
+            const isFinal = result.isFinal;
 
-          // Add to local history
-          transcriptionEntriesRef.current.push(entry);
+            console.log(`🎤 [${isFinal ? 'FINAL' : 'INTERIM'}] "${transcript}" (confidence: ${confidence.toFixed(2)})`);
 
-          // Broadcast to all participants
-          if (socketRef.current) {
-            socketRef.current.emit('transcription-entry', {
-              roomId: meetingId,
-              ...entry,
-            });
-          }
+            if (isFinal) {
+              // FINAL RESULT - Send to socket and add to entries
+              
+              // Clear any interim for this user
+              clearInterimTranscription(user.id);
+              
+              // Debounce final results to avoid duplicates
+              const now = Date.now();
+              if (now - lastFinalResultTime < FINAL_RESULT_DEBOUNCE) {
+                console.log('⏭️  Skipping duplicate final result (debounced)');
+                return;
+              }
+              lastFinalResultTime = now;
 
-          console.log(`🎤 Transcribed: [${secondsIntoMeeting}s] ${user.fullName}: ${transcript.trim()}`);
-        }
-      };
+              const secondsIntoMeeting = Math.floor((now - meetingStartTimeRef.current) / 1000);
 
-      recognition.onerror = (event) => {
-        console.error('Speech recognition error:', event.error);
-        
-        // Auto-restart on certain errors
-        if (event.error === 'no-speech' || event.error === 'audio-capture') {
-          setTimeout(() => {
-            if (recognitionRef.current) {
-              try {
-                recognitionRef.current.start();
-              } catch (err) {
-                console.warn('Failed to restart recognition:', err);
+              const entry = {
+                id: `${now}-${Math.random().toString(36).substr(2, 9)}`,
+                userId: user.id,
+                userName: user.fullName,
+                text: transcript.trim(),
+                timestamp: now,
+                secondsIntoMeeting,
+                confidence,
+                isFinal: true,
+              };
+
+              // DON'T add to local entries - backend will broadcast back with unique ID
+              // addTranscriptionEntry(entry); // REMOVED
+
+              // Broadcast to all participants via socket (backend will handle and send back)
+              if (socketRef.current && socketRef.current.connected) {
+                socketRef.current.emit('transcription-entry', {
+                  roomId: meetingId,
+                  ...entry,
+                });
+                
+                console.log('📤 Sent transcription to backend:', {
+                  userId: entry.userId,
+                  userName: entry.userName,
+                  text: entry.text
+                });
+              }
+
+              currentInterimText = '';
+            } else {
+              // INTERIM RESULT - Update UI in real-time
+              currentInterimText = transcript.trim();
+              
+              // Update interim display for local user
+              updateInterimTranscription(user.id, user.fullName, currentInterimText);
+
+              // Broadcast interim to other participants
+              if (socketRef.current && socketRef.current.connected) {
+                socketRef.current.emit('transcription-interim', {
+                  roomId: meetingId,
+                  userId: user.id,
+                  userName: user.fullName,
+                  text: currentInterimText,
+                  timestamp: Date.now(),
+                });
               }
             }
-          }, 1000);
-        }
-      };
-
-      recognition.onend = () => {
-        // Auto-restart if still in meeting
-        if (admissionStatus === AdmissionStatus.APPROVED && recognitionRef.current) {
-          try {
-            recognition.start();
           } catch (err) {
-            console.warn('Failed to restart recognition on end:', err);
+            console.error('Error processing transcription result:', err);
           }
-        }
-      };
+        };
 
-      // Start recognition
-      try {
-        recognition.start();
-        recognitionRef.current = recognition;
-        console.log('🎤 Transcription started automatically');
+        recognition.onerror = (event) => {
+          console.error('Speech recognition error:', event.error);
+          
+          // Don't restart on certain errors
+          if (event.error === 'aborted' || event.error === 'not-allowed') {
+            isTranscriptionActiveRef.current = false;
+            return;
+          }
+          
+          // Auto-restart on recoverable errors
+          if (event.error === 'no-speech' || event.error === 'audio-capture' || event.error === 'network') {
+            setTimeout(() => {
+              if (isTranscriptionActiveRef.current && recognitionRef.current) {
+                try {
+                  console.log('🔄 Restarting recognition after error:', event.error);
+                  recognitionRef.current.start();
+                } catch (err) {
+                  console.warn('Failed to restart recognition:', err);
+                }
+              }
+            }, 1000);
+          }
+        };
+
+        recognition.onend = () => {
+          console.log('🛑 Recognition ended');
+          
+          // Auto-restart if still in meeting
+          if (isTranscriptionActiveRef.current && admissionStatus === AdmissionStatus.APPROVED) {
+            setTimeout(() => {
+              if (recognitionRef.current && isTranscriptionActiveRef.current) {
+                try {
+                  console.log('🔄 Restarting recognition after end');
+                  recognition.start();
+                } catch (err) {
+                  console.warn('Failed to restart recognition on end:', err);
+                }
+              }
+            }, 500);
+          }
+        };
+
+        recognition.onstart = () => {
+          console.log('▶️  Recognition started');
+        };
+
+        // Start recognition
+        try {
+          recognition.start();
+          recognitionRef.current = recognition;
+          isTranscriptionActiveRef.current = true;
+          console.log('🎤 Auto-transcription started successfully');
+        } catch (err) {
+          console.error('Failed to start transcription:', err);
+        }
       } catch (err) {
-        console.error('Failed to start transcription:', err);
+        console.error('Failed to initialize speech recognition:', err);
       }
-    }, 2000); // 2 second delay - let meeting fully initialize first
+    }, 2000);
 
     // Cleanup
     return () => {
       clearTimeout(timeoutId);
+      isTranscriptionActiveRef.current = false;
       if (recognitionRef.current) {
         try {
           recognitionRef.current.stop();
@@ -525,27 +686,110 @@ const MeetingRoom = () => {
         }
       }
     };
-  }, [admissionStatus, user.id, user.fullName, meetingId]); // Removed refs from deps
+  }, [admissionStatus, user.id, user.fullName, meetingId, addTranscriptionEntry, updateInterimTranscription, clearInterimTranscription]);
 
   // =========================================================================
-  // TRANSCRIPTION - RECEIVE UPDATES FROM OTHERS
+  // TRANSCRIPTION - RECEIVE UPDATES FROM OTHERS (IMPROVED)
   // =========================================================================
   useEffect(() => {
     if (!socketRef.current) return;
 
-    const handleTranscriptionUpdate = (entry) => {
-      // Don't add our own entries (already added locally)
-      if (entry.userId === user.id) {
-        return;
+    // Handle FINAL transcription entries from other users
+    const handleTranscriptionEntry = (entry) => {
+      try {
+        console.log('🔍 [DEBUG] Received transcription-update:', {
+          entryUserId: entry.userId,
+          entryUserName: entry.userName,
+          currentUserId: user.id,
+          currentUserName: user.fullName,
+          text: entry.text,
+          entryId: entry.id
+        });
+
+        // NOTE: We no longer need to check if it's our own entry
+        // because backend uses socket.to() which excludes the sender
+
+        // Clear any interim for this user
+        clearInterimTranscription(entry.userId);
+
+        // Add to entries
+        console.log('➕ [DEBUG] Adding entry to transcriptions:', {
+          id: entry.id,
+          userId: entry.userId,
+          userName: entry.userName,
+          text: entry.text
+        });
+        addTranscriptionEntry(entry);
+
+        console.log(`📝 Received final transcription from ${entry.userName}`);
+      } catch (err) {
+        console.error('Error handling transcription entry:', err);
       }
-
-      // Add to complete history
-      transcriptionEntriesRef.current.push(entry);
-
-      console.log(`📝 Received transcription from ${entry.userName}`);
     };
 
-    // Listen for meeting start time (for late joiners)
+    // Handle INTERIM transcription updates from other users
+    const handleTranscriptionInterim = (data) => {
+      try {
+        // Don't process our own interim updates
+        if (data.userId === user.id) {
+          return;
+        }
+
+        // Update interim display for this user
+        updateInterimTranscription(data.userId, data.userName, data.text);
+
+        console.log(`💬 Received interim from ${data.userName}: "${data.text}"`);
+      } catch (err) {
+        console.error('Error handling interim transcription:', err);
+      }
+    };
+
+    // Handle transcription history (for reconnection & late joiners)
+    const handleTranscriptionHistory = ({ entries, count }) => {
+      try {
+        console.log(`📜 Received transcription history: ${count} entries`);
+        
+        if (entries && entries.length > 0) {
+          // Don't clear existing entries if we already have some loaded
+          // This prevents race conditions
+          const currentEntries = transcriptionEntriesRef.current;
+          
+          // Deep copy entries to prevent mutation
+          const historicalEntries = entries.map(e => ({
+            ...e,
+            userId: e.userId,      // Ensure these are preserved
+            userName: e.userName,  // Ensure these are preserved
+          }));
+          
+          console.log('🔍 [handleTranscriptionHistory] Historical entries:', 
+            historicalEntries.map(e => ({ userId: e.userId, userName: e.userName, text: e.text.substring(0, 20) }))
+          );
+          
+          // Only add entries that don't exist
+          const newEntries = [];
+          historicalEntries.forEach(entry => {
+            const exists = currentEntries.some(e => e.id === entry.id);
+            if (!exists) {
+              newEntries.push(entry);
+            }
+          });
+          
+          if (newEntries.length > 0) {
+            // Add new entries to existing ones
+            transcriptionEntriesRef.current = [...currentEntries, ...newEntries];
+            setTranscriptionEntries([...transcriptionEntriesRef.current]);
+            
+            console.log(`✅ Added ${newEntries.length} new historical transcriptions`);
+          } else {
+            console.log('ℹ️  No new historical entries to add');
+          }
+        }
+      } catch (err) {
+        console.error('Error handling transcription history:', err);
+      }
+    };
+
+    // Handle meeting start time (for late joiners)
     const handleMeetingStartTime = ({ startTime }) => {
       if (!meetingStartTimeRef.current) {
         meetingStartTimeRef.current = startTime;
@@ -553,33 +797,40 @@ const MeetingRoom = () => {
       }
     };
 
-    socketRef.current.on('transcription-update', handleTranscriptionUpdate);
+    socketRef.current.on('transcription-update', handleTranscriptionEntry);
+    socketRef.current.on('transcription-interim', handleTranscriptionInterim);
+    socketRef.current.on('transcription-history', handleTranscriptionHistory);
     socketRef.current.on('meeting-start-time', handleMeetingStartTime);
 
     // Request meeting start time if we don't have it
     if (!meetingStartTimeRef.current && admissionStatus === AdmissionStatus.APPROVED) {
       socketRef.current.emit('request-meeting-start-time', { roomId: meetingId });
     }
+    
+    // Request transcription history (for reconnection & late joiners)
+    if (admissionStatus === AdmissionStatus.APPROVED) {
+      socketRef.current.emit('request-transcription-history', { roomId: meetingId });
+    }
 
     return () => {
       if (socketRef.current) {
-        socketRef.current.off('transcription-update', handleTranscriptionUpdate);
+        socketRef.current.off('transcription-update', handleTranscriptionEntry);
+        socketRef.current.off('transcription-interim', handleTranscriptionInterim);
+        socketRef.current.off('transcription-history', handleTranscriptionHistory);
         socketRef.current.off('meeting-start-time', handleMeetingStartTime);
       }
     };
-  }, [user.id, admissionStatus, meetingId]); // Removed socketRef.current from deps
+  }, [user.id, admissionStatus, meetingId, addTranscriptionEntry, updateInterimTranscription, clearInterimTranscription]);
 
   // =========================================================================
   // SOCKET INITIALIZATION WITH ADMISSION CONTROL
   // =========================================================================
   const initializeSocket = () => {
-    // Prevent multiple socket initializations
     if (socketRef.current && socketRef.current.connected) {
       console.log("Socket already connected, skipping initialization");
       return;
     }
     
-    // Disconnect existing socket if any
     if (socketRef.current) {
       console.log("Disconnecting existing socket before creating new one");
       socketRef.current.disconnect();
@@ -593,7 +844,6 @@ const MeetingRoom = () => {
       reconnectionAttempts: MAX_RECONNECTION_ATTEMPTS,
       reconnectionDelay: RECONNECTION_DELAY,
       timeout: 10000,
-      // Prevent multiple connections
       forceNew: false,
       multiplex: true,
     });
@@ -641,7 +891,6 @@ const MeetingRoom = () => {
     reconnectionAttemptsRef.current = 0;
     setError("");
 
-    // If already approved, rejoin the room with new socket
     if (admissionStatus === AdmissionStatus.APPROVED) {
       console.log("Already approved, rejoining room with new socket");
       socketRef.current.emit("request-join-room", {
@@ -651,7 +900,6 @@ const MeetingRoom = () => {
         isRejoin: true,
       });
     } else if (!admissionRequestSentRef.current) {
-      // First time requesting to join
       setAdmissionStatus(AdmissionStatus.REQUESTING);
       admissionRequestSentRef.current = true;
 
@@ -662,7 +910,6 @@ const MeetingRoom = () => {
         isRejoin: false,
       });
     } else if (admissionStatus === AdmissionStatus.WAITING) {
-      // Still waiting for approval, just update socket ID
       socketRef.current.emit("update-waiting-socket", {
         roomId: meetingId,
         oduserId: user.id,
@@ -808,7 +1055,7 @@ const MeetingRoom = () => {
     socketRef.current.emit("approve-join-request", {
       roomId: meetingId,
       oduserId,
-      approverUserId: user.id,  // Send approver's userId for verification
+      approverUserId: user.id,
     });
   };
 
@@ -818,7 +1065,7 @@ const MeetingRoom = () => {
       roomId: meetingId,
       oduserId,
       reason,
-      approverUserId: user.id,  // Send approver's userId for verification
+      approverUserId: user.id,
     });
   };
 
@@ -826,7 +1073,7 @@ const MeetingRoom = () => {
     console.log("Admitting all waiting users");
     socketRef.current.emit("admit-all-waiting", {
       roomId: meetingId,
-      approverUserId: user.id,  // Send approver's userId for verification
+      approverUserId: user.id,
     });
     setPendingRequests([]);
   };
@@ -887,6 +1134,11 @@ const MeetingRoom = () => {
     console.log("User left:", userName);
     removeParticipant(socketId);
 
+    // Clear interim transcriptions for this user
+    if (oduserId) {
+      clearInterimTranscription(oduserId);
+    }
+
     if (wasHost) {
       setError(`Host ${userName} has left the meeting.`);
     }
@@ -895,6 +1147,11 @@ const MeetingRoom = () => {
   const handleUserDisconnected = ({ socketId, oduserId }) => {
     console.log("User disconnected (old socket):", socketId);
     removeParticipant(socketId);
+
+    // Clear interim transcriptions for this user
+    if (oduserId) {
+      clearInterimTranscription(oduserId);
+    }
 
     setParticipants((prev) =>
       prev.filter((p) => !(p.oduserId === oduserId && p.socketId !== socketId))
@@ -1248,11 +1505,8 @@ const MeetingRoom = () => {
 
     const newState = !isAudioEnabled;
 
-    // Method 1: Set track enabled state (affects local stream)
     audioTrack.enabled = newState;
     
-    // Method 2: Also mute/unmute on all peer connection senders
-    // This ensures the audio is actually stopped from being sent
     Object.values(peerConnectionsRef.current).forEach((pc) => {
       if (pc && pc.getSenders) {
         const audioSender = pc.getSenders().find(sender => 
@@ -1283,10 +1537,8 @@ const MeetingRoom = () => {
 
     const newState = !isVideoEnabled;
 
-    // Method 1: Set track enabled state (affects local stream)
     videoTrack.enabled = newState;
     
-    // Method 2: Also enable/disable on all peer connection senders
     Object.values(peerConnectionsRef.current).forEach((pc) => {
       if (pc && pc.getSenders) {
         const videoSender = pc.getSenders().find(sender => 
@@ -1577,7 +1829,7 @@ const MeetingRoom = () => {
   }
 
   // =========================================================================
-  // RENDER - Waiting Room (for non-approved users)
+  // RENDER - Waiting Room
   // =========================================================================
   if (
     admissionStatus === AdmissionStatus.WAITING ||
@@ -1634,7 +1886,7 @@ const MeetingRoom = () => {
   }
 
   // =========================================================================
-  // RENDER - Error State
+  // RENDER - Error Screen
   // =========================================================================
   if (admissionStatus === AdmissionStatus.ERROR) {
     return (
@@ -1812,11 +2064,12 @@ const MeetingRoom = () => {
         onUnreadCountChange={setChatUnreadCount}
       />
 
-      {/* Transcription Widget Component */}
+      {/* Transcription Widget Component - PASS BOTH FINAL + INTERIM */}
       <TranscriptionWidget
         isOpen={isTranscriptionOpen}
         setIsOpen={setIsTranscriptionOpen}
-        entries={transcriptionEntriesRef.current}
+        entries={transcriptionEntries} // React state
+        interimTranscriptions={interimTranscriptionsRef.current} // Map of interim transcriptions
         meetingId={meetingId}
         userId={user.id}
       />
@@ -1972,7 +2225,7 @@ const ErrorScreen = ({ error, onRetry, onGoBack }) => {
 };
 
 // ============================================================================
-// WAITING ROOM PANEL COMPONENT (Host View)
+// WAITING ROOM PANEL COMPONENT
 // ============================================================================
 const WaitingRoomPanel = ({ pendingRequests, onApprove, onDeny, onAdmitAll, onClose }) => {
   const formatWaitTime = (requestedAt) => {
