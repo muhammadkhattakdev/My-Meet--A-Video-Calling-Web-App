@@ -10,6 +10,7 @@ import fs from 'fs';
 import authRoutes from './routes/auth.js';
 import meetingRoutes from './routes/meeting.js';
 import messageRoutes from './routes/message.js';
+import transcriptionRoutes from './routes/transcription.js';
 
 // Load environment variables
 dotenv.config();
@@ -71,6 +72,7 @@ const upload = multer({
 app.use('/api/auth', authRoutes);
 app.use('/api/meetings', meetingRoutes);
 app.use('/api/messages', messageRoutes);
+app.use('/api/transcriptions', transcriptionRoutes);
 
 // Recording upload endpoint
 app.post('/api/meetings/:meetingId/upload-recording', 
@@ -903,6 +905,44 @@ io.on('connection', (socket) => {
       socketId: socket.id,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  // -------------------------------------------------------------------------
+  // Transcription events
+  // -------------------------------------------------------------------------
+  socket.on('transcription-entry', ({ roomId, userId, userName, text, timestamp, secondsIntoMeeting, confidence }) => {
+    console.log(`Transcription entry from ${userName} in room ${roomId}`);
+    
+    // Broadcast to all participants in the room (including sender for confirmation)
+    io.to(roomId).emit('transcription-update', {
+      userId,
+      userName,
+      text,
+      timestamp,
+      secondsIntoMeeting,
+      confidence,
+      socketId: socket.id,
+    });
+  });
+
+  // Share meeting start time with new joiners
+  socket.on('request-meeting-start-time', ({ roomId }) => {
+    const metadata = roomMetadata.get(roomId);
+    if (metadata && metadata.meetingStartTime) {
+      socket.emit('meeting-start-time', {
+        startTime: metadata.meetingStartTime
+      });
+    }
+  });
+
+  // Host sets meeting start time
+  socket.on('set-meeting-start-time', ({ roomId, startTime }) => {
+    const metadata = roomMetadata.get(roomId);
+    if (metadata && !metadata.meetingStartTime) {
+      metadata.meetingStartTime = startTime;
+      roomMetadata.set(roomId, metadata);
+      console.log(`Meeting start time set for room ${roomId}: ${startTime}`);
+    }
   });
 
   // -------------------------------------------------------------------------

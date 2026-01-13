@@ -1,0 +1,259 @@
+/* Transcription Widget Container */
+.transcription-widget {
+  position: fixed;
+  bottom: 100px;
+  right: calc(var(--spacing-xl) + 400px); /* Positioned left of chat */
+  width: 420px;
+  max-width: calc(100vw - 2 * var(--spacing-xl));
+  height: 600px;
+  max-height: calc(100vh - 180px);
+  background: var(--bg-surface);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-xl);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: var(--z-modal);
+  transition: all var(--transition-slow);
+  border: 1px solid var(--border-default);
+}
+
+.transcription-widget.closed {
+  opacity: 0;
+  transform: translateY(20px) scale(0.95);
+  pointer-events: none;
+}
+
+.transcription-widget.open {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+  animation: slideInTranscription 0.3s ease-out;
+}
+
+@keyframes slideInTranscription {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* Header */
+.transcription-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--spacing-md) var(--spacing-lg);
+  background: var(--gradient-brand);
+  color: var(--text-inverse);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.header-left {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-sm);
+}
+
+.header-left h3 {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.header-action-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-inverse);
+  cursor: pointer;
+  padding: var(--spacing-xs);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+  opacity: 0.9;
+}
+
+.header-action-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  opacity: 1;
+}
+
+.header-action-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.close-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-inverse);
+  cursor: pointer;
+  padding: var(--spacing-xs);
+  border-radius: var(--radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all var(--transition-fast);
+}
+
+.close-btn:hover {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Transcription Body */
+.transcription-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: var(--spacing-lg);
+  background: var(--bg-app);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Empty State */
+.transcription-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--spacing-sm);
+  height: 100%;
+  color: var(--text-muted);
+  text-align: center;
+  padding: var(--spacing-xl);
+}
+
+.transcription-empty p {
+  margin: 0;
+  font-size: var(--font-size-lg);
+  font-weight: 500;
+  color: var(--text-secondary);
+}
+
+.transcription-empty span {
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+/* Transcription List */
+.transcription-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-xs);
+}
+
+/* Footer */
+.transcription-footer {
+  padding: var(--spacing-sm) var(--spacing-lg);
+  background: var(--bg-surface);
+  border-top: 1px solid var(--border-default);
+}
+
+.transcription-info {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+}
+
+.info-item {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-xs);
+}
+
+.info-separator {
+  opacity: 0.5;
+}
+
+/* Scrollbar */
+.transcription-body::-webkit-scrollbar {
+  width: 6px;
+}
+
+.transcription-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.transcription-body::-webkit-scrollbar-thumb {
+  background: var(--border-muted);
+  border-radius: var(--radius-full);
+}
+
+.transcription-body::-webkit-scrollbar-thumb:hover {
+  background: var(--text-muted);
+}
+
+/* Dark Mode */
+[data-theme="dark"] .transcription-widget {
+  background: var(--bg-surface);
+  border-color: var(--border-muted);
+}
+
+[data-theme="dark"] .transcription-body {
+  background: var(--bg-app);
+}
+
+[data-theme="dark"] .transcription-footer {
+  background: var(--bg-surface);
+  border-top-color: var(--border-muted);
+}
+
+/* Responsive - Mobile */
+@media (max-width: 768px) {
+  .transcription-widget {
+    bottom: 90px;
+    right: var(--spacing-lg);
+    left: var(--spacing-lg);
+    width: auto;
+    max-width: none;
+    height: calc(100vh - 170px);
+  }
+
+  .transcription-header {
+    padding: var(--spacing-sm) var(--spacing-md);
+  }
+
+  .header-left h3 {
+    font-size: var(--font-size-base);
+  }
+
+  .transcription-body {
+    padding: var(--spacing-md);
+  }
+
+  .transcription-footer {
+    padding: var(--spacing-xs) var(--spacing-md);
+  }
+
+  .transcription-info {
+    font-size: 0.6875rem;
+  }
+}
+
+/* When both chat and transcription are open */
+@media (min-width: 769px) {
+  /* If chat is also open, adjust positioning */
+  body:has(.room-messaging.open) .transcription-widget.open {
+    right: calc(var(--spacing-xl) + 400px);
+  }
+}
+
+/* Single widget view (when chat is closed) */
+@media (min-width: 769px) {
+  body:not(:has(.room-messaging.open)) .transcription-widget.open {
+    right: var(--spacing-xl);
+  }
+}

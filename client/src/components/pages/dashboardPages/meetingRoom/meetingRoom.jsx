@@ -20,13 +20,14 @@ import {
   XCircle,
   AlertCircle,
   MessageCircle,
+  FileText,
 } from "lucide-react";
 import { io } from "socket.io-client";
 import "./style.css";
 import api from "../../../request";
 import { useApp } from "../../../../context/context";
 import RoomMessaging from "../../../dashboardComponents/roomMessaging/roomMessaging";
-
+import TranscriptionWidget from "../../../dashboardComponents/transcriptionWidget/transcriptionWidget";
 
 // ============================================================================
 // CONSTANTS
@@ -87,6 +88,8 @@ const MeetingRoom = () => {
   // -------------------------------------------------------------------------
   const [participants, setParticipants] = useState([]);
   const [connectionStates, setConnectionStates] = useState({});
+  const [speakingParticipants, setSpeakingParticipants] = useState(new Set());
+  const [isLocalUserSpeaking, setIsLocalUserSpeaking] = useState(false);
 
   // -------------------------------------------------------------------------
   // STATE - UI
@@ -96,6 +99,16 @@ const MeetingRoom = () => {
   const [isInitializing, setIsInitializing] = useState(true);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  const [isTranscriptionOpen, setIsTranscriptionOpen] = useState(false);
+
+  // -------------------------------------------------------------------------
+  // STATE - Transcription
+  // -------------------------------------------------------------------------
+  const transcriptionEntriesRef = useRef([]); // Complete history
+  const recognitionRef = useRef(null); // Speech recognition instance
+  const meetingStartTimeRef = useRef(null); // Meeting start timestamp
+  const transcriptionBufferRef = useRef(''); // Buffer for continuous speech
+  const bufferTimeoutRef = useRef(null); // Timeout for finalizing buffer
 
   // -------------------------------------------------------------------------
   // STATE - Admission Control (NEW)
@@ -126,6 +139,35 @@ const MeetingRoom = () => {
   // =========================================================================
   const cleanup = useCallback(() => {
     isLeavingRef.current = true;
+
+    // Save transcription before leaving (host only)
+    if (isHost && transcriptionEntriesRef.current.length > 0) {
+      // Save inline to avoid hoisting issues
+      (async () => {
+        try {
+          console.log('💾 Saving transcription...');
+          
+          await api.post(`/api/transcriptions/${meetingId}`, {
+            entries: transcriptionEntriesRef.current,
+            startedAt: new Date(meetingStartTimeRef.current),
+          });
+
+          console.log('✅ Transcription saved successfully');
+        } catch (error) {
+          console.error('❌ Failed to save transcription:', error);
+        }
+      })();
+    }
+
+    // Stop speech recognition
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+        recognitionRef.current = null;
+      } catch (err) {
+        console.warn('Error stopping recognition in cleanup:', err);
+      }
+    }
 
     if (isRecording && mediaRecorderRef.current) {
       try {
@@ -164,7 +206,7 @@ const MeetingRoom = () => {
       mixedStreamRef.current.getTracks().forEach((track) => track.stop());
       mixedStreamRef.current = null;
     }
-  }, [isRecording]);
+  }, [isRecording, isHost, meetingId]);
 
   // =========================================================================
   // MEDIA ERROR HANDLER
@@ -221,6 +263,311 @@ const MeetingRoom = () => {
       cleanup();
     };
   }, []);
+
+  // =========================================================================
+  // AUDIO LEVEL DETECTION FOR LOCAL USER
+  // =========================================================================
+  useEffect(() => {
+    if (!localStreamRef.current || !isAudioEnabled) {
+      setIsLocalUserSpeaking(false);
+      return;
+    }
+
+    let audioContext = null;
+    let rafId = null;
+
+    // Delay initialization to not block meeting start
+    const timeoutId = setTimeout(() => {
+      try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const analyser = audioContext.createAnalyser();
+        const microphone = audioContext.createMediaStreamSource(localStreamRef.current);
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+        analyser.smoothingTimeConstant = 0.8;
+        analyser.fftSize = 1024;
+        microphone.connect(analyser);
+
+        const detectAudio = () => {
+          analyser.getByteFrequencyData(dataArray);
+          const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+          
+          // Threshold for speaking detection (adjust if needed)
+          const isSpeaking = average > 20;
+          setIsLocalUserSpeaking(isSpeaking);
+
+          rafId = requestAnimationFrame(detectAudio);
+        };
+
+        detectAudio();
+      } catch (err) {
+        console.warn('Failed to initialize audio detection:', err);
+      }
+    }, 1000); // Delay 1 second to let meeting start smoothly
+
+    return () => {
+      clearTimeout(timeoutId);
+      if (rafId) cancelAnimationFrame(rafId);
+      if (audioContext) {
+        try {
+          audioContext.close();
+        } catch (err) {
+          console.warn('Error closing audio context:', err);
+        }
+      }
+    };
+  }, [isAudioEnabled]); // Removed localStreamRef.current from deps
+
+  // =========================================================================
+  // AUDIO LEVEL DETECTION FOR REMOTE PARTICIPANTS
+  // =========================================================================
+  useEffect(() => {
+    // Delay to avoid blocking meeting start
+    const timeoutId = setTimeout(() => {
+      const audioContexts = new Map();
+      const rafIds = new Map();
+
+      participants.forEach((participant) => {
+        if (!participant.stream || !participant.isAudioEnabled) {
+          setSpeakingParticipants((prev) => {
+            const newSet = new Set(prev);
+            newSet.delete(participant.socketId);
+            return newSet;
+          });
+          return;
+        }
+
+        try {
+          const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+          const analyser = audioContext.createAnalyser();
+          const source = audioContext.createMediaStreamSource(participant.stream);
+          const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+          analyser.smoothingTimeConstant = 0.8;
+          analyser.fftSize = 1024;
+          source.connect(analyser);
+
+          audioContexts.set(participant.socketId, audioContext);
+
+          const detectAudio = () => {
+            analyser.getByteFrequencyData(dataArray);
+            const average = dataArray.reduce((a, b) => a + b) / dataArray.length;
+            
+            const isSpeaking = average > 20;
+            
+            setSpeakingParticipants((prev) => {
+              const newSet = new Set(prev);
+              if (isSpeaking) {
+                newSet.add(participant.socketId);
+              } else {
+                newSet.delete(participant.socketId);
+              }
+              return newSet;
+            });
+
+            rafIds.set(participant.socketId, requestAnimationFrame(detectAudio));
+          };
+
+          detectAudio();
+        } catch (err) {
+          console.warn(`Failed to create audio detection for ${participant.userName}:`, err);
+        }
+      });
+
+      // Cleanup function
+      return () => {
+        rafIds.forEach((rafId) => cancelAnimationFrame(rafId));
+        audioContexts.forEach((context) => {
+          try {
+            context.close();
+          } catch (err) {
+            console.warn('Error closing audio context:', err);
+          }
+        });
+      };
+    }, 1500); // 1.5 second delay for remote participants
+
+    return () => {
+      clearTimeout(timeoutId);
+    };
+  }, [participants.length]); // Only re-run when participant count changes
+
+  // =========================================================================
+  // TRANSCRIPTION - SET MEETING START TIME
+  // =========================================================================
+  useEffect(() => {
+    if (admissionStatus === AdmissionStatus.APPROVED && !meetingStartTimeRef.current) {
+      meetingStartTimeRef.current = Date.now();
+      console.log('📅 Meeting start time recorded:', meetingStartTimeRef.current);
+      
+      // If host, share meeting start time via socket
+      if (isHost && socketRef.current) {
+        socketRef.current.emit('set-meeting-start-time', {
+          roomId: meetingId,
+          startTime: meetingStartTimeRef.current
+        });
+      }
+    }
+  }, [admissionStatus, isHost, meetingId]);
+
+  // =========================================================================
+  // TRANSCRIPTION - AUTO-START SPEECH RECOGNITION
+  // =========================================================================
+  useEffect(() => {
+    // Only start if approved, have local stream, and socket is connected
+    if (
+      admissionStatus !== AdmissionStatus.APPROVED ||
+      !localStreamRef.current ||
+      !socketRef.current ||
+      recognitionRef.current
+    ) {
+      return;
+    }
+
+    // Delay transcription start to not block meeting initialization
+    const timeoutId = setTimeout(() => {
+      // Check browser support
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      
+      if (!SpeechRecognition) {
+        console.warn('⚠️ Speech recognition not supported in this browser');
+        return;
+      }
+
+      const recognition = new SpeechRecognition();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = navigator.language || 'en-US';
+      recognition.maxAlternatives = 1;
+
+      // Handle transcription results
+      recognition.onresult = (event) => {
+        const result = event.results[event.results.length - 1];
+        const transcript = result[0].transcript;
+
+        if (result.isFinal) {
+          // Final result - send to socket
+          const now = Date.now();
+          const secondsIntoMeeting = Math.floor((now - meetingStartTimeRef.current) / 1000);
+
+          const entry = {
+            id: `${now}-${Math.random()}`,
+            userId: user.id,
+            userName: user.fullName,
+            text: transcript.trim(),
+            timestamp: now,
+            secondsIntoMeeting,
+            confidence: result[0].confidence || 1,
+          };
+
+          // Add to local history
+          transcriptionEntriesRef.current.push(entry);
+
+          // Broadcast to all participants
+          if (socketRef.current) {
+            socketRef.current.emit('transcription-entry', {
+              roomId: meetingId,
+              ...entry,
+            });
+          }
+
+          console.log(`🎤 Transcribed: [${secondsIntoMeeting}s] ${user.fullName}: ${transcript.trim()}`);
+        }
+      };
+
+      recognition.onerror = (event) => {
+        console.error('Speech recognition error:', event.error);
+        
+        // Auto-restart on certain errors
+        if (event.error === 'no-speech' || event.error === 'audio-capture') {
+          setTimeout(() => {
+            if (recognitionRef.current) {
+              try {
+                recognitionRef.current.start();
+              } catch (err) {
+                console.warn('Failed to restart recognition:', err);
+              }
+            }
+          }, 1000);
+        }
+      };
+
+      recognition.onend = () => {
+        // Auto-restart if still in meeting
+        if (admissionStatus === AdmissionStatus.APPROVED && recognitionRef.current) {
+          try {
+            recognition.start();
+          } catch (err) {
+            console.warn('Failed to restart recognition on end:', err);
+          }
+        }
+      };
+
+      // Start recognition
+      try {
+        recognition.start();
+        recognitionRef.current = recognition;
+        console.log('🎤 Transcription started automatically');
+      } catch (err) {
+        console.error('Failed to start transcription:', err);
+      }
+    }, 2000); // 2 second delay - let meeting fully initialize first
+
+    // Cleanup
+    return () => {
+      clearTimeout(timeoutId);
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+          recognitionRef.current = null;
+        } catch (err) {
+          console.warn('Error stopping recognition:', err);
+        }
+      }
+    };
+  }, [admissionStatus, user.id, user.fullName, meetingId]); // Removed refs from deps
+
+  // =========================================================================
+  // TRANSCRIPTION - RECEIVE UPDATES FROM OTHERS
+  // =========================================================================
+  useEffect(() => {
+    if (!socketRef.current) return;
+
+    const handleTranscriptionUpdate = (entry) => {
+      // Don't add our own entries (already added locally)
+      if (entry.userId === user.id) {
+        return;
+      }
+
+      // Add to complete history
+      transcriptionEntriesRef.current.push(entry);
+
+      console.log(`📝 Received transcription from ${entry.userName}`);
+    };
+
+    // Listen for meeting start time (for late joiners)
+    const handleMeetingStartTime = ({ startTime }) => {
+      if (!meetingStartTimeRef.current) {
+        meetingStartTimeRef.current = startTime;
+        console.log('📅 Received meeting start time:', startTime);
+      }
+    };
+
+    socketRef.current.on('transcription-update', handleTranscriptionUpdate);
+    socketRef.current.on('meeting-start-time', handleMeetingStartTime);
+
+    // Request meeting start time if we don't have it
+    if (!meetingStartTimeRef.current && admissionStatus === AdmissionStatus.APPROVED) {
+      socketRef.current.emit('request-meeting-start-time', { roomId: meetingId });
+    }
+
+    return () => {
+      if (socketRef.current) {
+        socketRef.current.off('transcription-update', handleTranscriptionUpdate);
+        socketRef.current.off('meeting-start-time', handleMeetingStartTime);
+      }
+    };
+  }, [user.id, admissionStatus, meetingId]); // Removed socketRef.current from deps
 
   // =========================================================================
   // SOCKET INITIALIZATION WITH ADMISSION CONTROL
@@ -1353,6 +1700,7 @@ const MeetingRoom = () => {
       <div className="meeting-content">
         <div className="participants-grid">
           <div className="participant-card local">
+            {isLocalUserSpeaking && <SpeakingIndicator />}
             <video
               ref={localVideoRef}
               autoPlay
@@ -1382,6 +1730,7 @@ const MeetingRoom = () => {
                 key={participant.socketId}
                 participant={participant}
                 connectionState={connectionStates[participant.socketId]}
+                isSpeaking={speakingParticipants.has(participant.socketId)}
               />
             ))}
         </div>
@@ -1433,6 +1782,15 @@ const MeetingRoom = () => {
           </button>
 
           <button
+            onClick={() => setIsTranscriptionOpen(!isTranscriptionOpen)}
+            className={`control-btn ${isTranscriptionOpen ? "active" : ""}`}
+            aria-label={isTranscriptionOpen ? "Close transcription" : "View transcription"}
+            title={isTranscriptionOpen ? "Close transcription" : "View live transcription"}
+          >
+            <FileText size={24} />
+          </button>
+
+          <button
             onClick={leaveMeeting}
             className="control-btn leave"
             aria-label="Leave meeting"
@@ -1452,6 +1810,15 @@ const MeetingRoom = () => {
         isOpen={isChatOpen}
         setIsOpen={setIsChatOpen}
         onUnreadCountChange={setChatUnreadCount}
+      />
+
+      {/* Transcription Widget Component */}
+      <TranscriptionWidget
+        isOpen={isTranscriptionOpen}
+        setIsOpen={setIsTranscriptionOpen}
+        entries={transcriptionEntriesRef.current}
+        meetingId={meetingId}
+        userId={user.id}
       />
     </div>
   );
@@ -1679,9 +2046,22 @@ const WaitingRoomPanel = ({ pendingRequests, onApprove, onDeny, onAdmitAll, onCl
 };
 
 // ============================================================================
+// SPEAKING INDICATOR COMPONENT
+// ============================================================================
+const SpeakingIndicator = () => {
+  return (
+    <div className="speaking-indicator">
+      <div className="bar bar-1"></div>
+      <div className="bar bar-2"></div>
+      <div className="bar bar-3"></div>
+    </div>
+  );
+};
+
+// ============================================================================
 // PARTICIPANT CARD COMPONENT
 // ============================================================================
-const ParticipantCard = ({ participant, connectionState }) => {
+const ParticipantCard = ({ participant, connectionState, isSpeaking }) => {
   const videoRef = useRef(null);
 
   useEffect(() => {
@@ -1692,6 +2072,7 @@ const ParticipantCard = ({ participant, connectionState }) => {
 
   return (
     <div className="participant-card">
+      {isSpeaking && <SpeakingIndicator />}
       <video
         ref={videoRef}
         autoPlay
