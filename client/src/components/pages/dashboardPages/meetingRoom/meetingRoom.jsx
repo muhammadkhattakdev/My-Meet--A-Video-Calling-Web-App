@@ -150,11 +150,31 @@ const MeetingRoom = () => {
     console.log('🔍 [addTranscriptionEntry] Before add:', {
       currentCount: transcriptionEntriesRef.current.length,
       newEntry: {
+        id: entry.id,
         userId: entry.userId,
         userName: entry.userName,
         text: entry.text
       }
     });
+
+    // Check for duplicate ID - CRITICAL for preventing duplicates!
+    const duplicate = transcriptionEntriesRef.current.find(e => e.id === entry.id);
+    if (duplicate) {
+      console.warn('⚠️ [addTranscriptionEntry] Duplicate ID detected, skipping:', {
+        duplicateId: entry.id,
+        existingEntry: {
+          userId: duplicate.userId,
+          userName: duplicate.userName,
+          text: duplicate.text
+        },
+        newEntry: {
+          userId: entry.userId,
+          userName: entry.userName,
+          text: entry.text
+        }
+      });
+      return; // Don't add duplicate
+    }
 
     // Deep copy entry to prevent any mutation
     const entryCopy = {
@@ -169,14 +189,16 @@ const MeetingRoom = () => {
     console.log('🔍 [addTranscriptionEntry] After add:', {
       newCount: transcriptionEntriesRef.current.length,
       allEntries: transcriptionEntriesRef.current.map(e => ({
+        id: e.id,
         userId: e.userId,
         userName: e.userName,
         text: e.text.substring(0, 20)
       }))
     });
 
-    // Update state (triggers re-render)
-    setTranscriptionEntries(prev => [...prev, entryCopy]);
+    // Update state from ref (triggers re-render)
+    // Use ref as single source of truth to avoid stale state issues
+    setTranscriptionEntries([...transcriptionEntriesRef.current]);
     
     console.log(`📝 Added transcription entry: [${entryCopy.secondsIntoMeeting}s] ${entryCopy.userName}: ${entryCopy.text}`);
   }, []);
@@ -188,7 +210,7 @@ const MeetingRoom = () => {
     if (!interimText || !interimText.trim()) {
       // Clear interim for this user
       interimTranscriptionsRef.current.delete(userId);
-      setTranscriptionEntries(prev => [...transcriptionEntriesRef.current]); // Force re-render without interim
+      setTranscriptionEntries([...transcriptionEntriesRef.current]); // Force re-render without interim
       return;
     }
 
@@ -204,7 +226,7 @@ const MeetingRoom = () => {
     // Throttled state update
     if (!interimUpdateTimeoutRef.current) {
       interimUpdateTimeoutRef.current = setTimeout(() => {
-        setTranscriptionEntries(prev => [...transcriptionEntriesRef.current]);
+        setTranscriptionEntries([...transcriptionEntriesRef.current]);
         interimUpdateTimeoutRef.current = null;
       }, INTERIM_UPDATE_THROTTLE);
     }
@@ -215,7 +237,7 @@ const MeetingRoom = () => {
   // =========================================================================
   const clearInterimTranscription = useCallback((userId) => {
     interimTranscriptionsRef.current.delete(userId);
-    setTranscriptionEntries(prev => [...transcriptionEntriesRef.current]);
+    setTranscriptionEntries([...transcriptionEntriesRef.current]);
   }, []);
 
   // =========================================================================
@@ -530,6 +552,7 @@ const MeetingRoom = () => {
 
         let currentInterimText = '';
         let lastFinalResultTime = 0;
+        let processedResultIndices = new Set(); // Track which result indices we've already processed
 
         // Handle transcription results (IMPROVED)
         recognition.onresult = (event) => {
@@ -543,26 +566,29 @@ const MeetingRoom = () => {
             const confidence = result[0].confidence || 1;
             const isFinal = result.isFinal;
 
-            console.log(`🎤 [${isFinal ? 'FINAL' : 'INTERIM'}] "${transcript}" (confidence: ${confidence.toFixed(2)})`);
+            console.log(`🎤 [${isFinal ? 'FINAL' : 'INTERIM'}] "${transcript}" (confidence: ${confidence.toFixed(2)}, index: ${resultIndex})`);
 
             if (isFinal) {
-              // FINAL RESULT - Send to socket and add to entries
+              // Check if we've already processed this result index
+              if (processedResultIndices.has(resultIndex)) {
+                console.log(`⏭️  Skipping already processed result index ${resultIndex}`);
+                return;
+              }
+              
+              // Mark this result index as processed
+              processedResultIndices.add(resultIndex);
+              
+              // FINAL RESULT - Add locally AND broadcast to others
+              // Backend uses explicit filtering so sender doesn't receive their own transcription back
               
               // Clear any interim for this user
               clearInterimTranscription(user.id);
               
-              // Debounce final results to avoid duplicates
               const now = Date.now();
-              if (now - lastFinalResultTime < FINAL_RESULT_DEBOUNCE) {
-                console.log('⏭️  Skipping duplicate final result (debounced)');
-                return;
-              }
-              lastFinalResultTime = now;
-
               const secondsIntoMeeting = Math.floor((now - meetingStartTimeRef.current) / 1000);
 
               const entry = {
-                id: `${now}-${Math.random().toString(36).substr(2, 9)}`,
+                id: `${now}-${Math.random().toString(36).substr(2, 9)}`,  // Frontend generates ID for speaker
                 userId: user.id,
                 userName: user.fullName,
                 text: transcript.trim(),
@@ -572,20 +598,14 @@ const MeetingRoom = () => {
                 isFinal: true,
               };
 
-              // DON'T add to local entries - backend will broadcast back with unique ID
-              // addTranscriptionEntry(entry); // REMOVED
+              // Add to local entries (speaker only - others get from backend)
+              addTranscriptionEntry(entry);
 
-              // Broadcast to all participants via socket (backend will handle and send back)
+              // Broadcast to all participants via socket
               if (socketRef.current && socketRef.current.connected) {
                 socketRef.current.emit('transcription-entry', {
                   roomId: meetingId,
                   ...entry,
-                });
-                
-                console.log('📤 Sent transcription to backend:', {
-                  userId: entry.userId,
-                  userName: entry.userName,
-                  text: entry.text
                 });
               }
 
@@ -694,7 +714,7 @@ const MeetingRoom = () => {
   useEffect(() => {
     if (!socketRef.current) return;
 
-    // Handle FINAL transcription entries from other users
+    // Handle FINAL transcription entries from OTHER users
     const handleTranscriptionEntry = (entry) => {
       try {
         console.log('🔍 [DEBUG] Received transcription-update:', {
@@ -706,8 +726,8 @@ const MeetingRoom = () => {
           entryId: entry.id
         });
 
-        // NOTE: We no longer need to check if it's our own entry
-        // because backend uses socket.to() which excludes the sender
+        // Backend uses socket.to() which EXCLUDES the sender
+        // So we only receive transcriptions from OTHER users here
 
         // Clear any interim for this user
         clearInterimTranscription(entry.userId);

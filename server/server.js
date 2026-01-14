@@ -931,7 +931,7 @@ io.on('connection', (socket) => {
   
   // FINAL transcription entry (completed sentence)
   socket.on('transcription-entry', ({ roomId, userId, userName, text, timestamp, secondsIntoMeeting, confidence, id }) => {
-    console.log(`✅ FINAL transcription from ${userName}: "${text}"`);
+    console.log(`✅ FINAL transcription from ${userName}: "${text}" (socket: ${socket.id})`);
     
     // CRITICAL: Generate ID on backend to ensure uniqueness across all clients
     const uniqueId = `${Date.now()}-${socket.id.substring(0, 8)}-${Math.random().toString(36).substr(2, 9)}`;
@@ -952,7 +952,8 @@ io.on('connection', (socket) => {
       id: entry.id,
       userId: entry.userId,
       userName: entry.userName,
-      text: entry.text
+      text: entry.text,
+      senderSocketId: socket.id
     });
     
     // Store in history for this room
@@ -961,8 +962,22 @@ io.on('connection', (socket) => {
     }
     transcriptionHistory.get(roomId).push(entry);
     
-    // BROADCAST TO ALL (including sender) - sender doesn't add locally anymore
-    io.to(roomId).emit('transcription-update', entry);
+    // BROADCAST TO OTHERS ONLY (exclude sender)
+    // Get all sockets in the room EXCEPT the sender
+    const room = rooms.get(roomId);
+    if (room) {
+      for (const [socketId, userData] of room.entries()) {
+        // Skip the sender
+        if (socketId === socket.id) {
+          console.log(`⏭️  Skipping sender ${userName} (${socketId})`);
+          continue;
+        }
+        
+        // Send to this specific socket
+        io.to(socketId).emit('transcription-update', entry);
+        console.log(`📤 Sent transcription to ${userData.userName} (${socketId})`);
+      }
+    }
     
     console.log(`📊 Room ${roomId} now has ${transcriptionHistory.get(roomId).length} entries`);
   });
